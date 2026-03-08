@@ -2,7 +2,7 @@
  * Plot Viewer - Vermont Property Search
  *
  * Static property visualization using:
- * - MapLibre GL JS for rendering
+ * - MapLibre GL JS for rendering (with 3D terrain)
  * - VCGI ArcGIS Feature Service for Vermont parcel data
  * - Turf.js for geospatial calculations
  * - LocalStorage for favorites persistence
@@ -13,18 +13,22 @@ const CONFIG = {
     // VCGI Parcel Feature Service (Vermont standardized parcels)
     parcelServiceUrl: 'https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services/FS_VCGI_OPENDATA_Cadastral_VTPARCELS_poly_standardized_parcels_SP_v1/FeatureServer/0',
 
+    // MapLibre demo terrain tiles (free, no API key)
+    terrainUrl: 'https://demotiles.maplibre.org/terrain-tiles/tiles.json',
+
     // Map settings
     defaultCenter: [-72.7, 44.0], // Vermont center
     defaultZoom: 8,
 
     // Query settings
-    maxRecords: 1000, // Max parcels to load per request
-    minZoomForParcels: 12, // Only load parcels at this zoom or higher
+    maxRecords: 1000,
+    minZoomForParcels: 12,
 };
 
 // State
 let map = null;
-let selectedParcel = null;
+let selectedParcelId = null;
+let highlightedFavoriteId = null;
 
 // Default favorites (preset parcels of interest)
 const DEFAULT_FAVORITES = [
@@ -32,7 +36,7 @@ const DEFAULT_FAVORITES = [
         id: '618-194-10882',
         name: 'STOCKBRIDGE',
         address: '0 Blackmer Blvd',
-        acres: 74.4, // Full parcel - listing is 56.5 acres (portion being sold)
+        acres: 74.4,
         value: 149999,
         span: '618-194-10882',
         geometry: {
@@ -69,23 +73,19 @@ function initMap() {
         style: {
             version: 8,
             sources: {
-                // OpenStreetMap raster tiles (free, no API key)
+                // OpenStreetMap raster tiles
                 'osm': {
                     type: 'raster',
-                    tiles: [
-                        'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
-                    ],
+                    tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
                     tileSize: 256,
                     attribution: '© OpenStreetMap contributors'
                 },
-                // Stadia terrain tiles (free tier available)
-                'stadia-terrain': {
+                // ESRI World Imagery (satellite)
+                'satellite': {
                     type: 'raster',
-                    tiles: [
-                        'https://tiles.stadiamaps.com/tiles/stamen_terrain/{z}/{x}/{y}.png'
-                    ],
+                    tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
                     tileSize: 256,
-                    attribution: '© Stadia Maps, © Stamen Design'
+                    attribution: '© Esri, Maxar, Earthstar Geographics'
                 }
             },
             layers: [
@@ -95,23 +95,80 @@ function initMap() {
                     source: 'osm',
                     minzoom: 0,
                     maxzoom: 19
+                },
+                {
+                    id: 'satellite-layer',
+                    type: 'raster',
+                    source: 'satellite',
+                    minzoom: 0,
+                    maxzoom: 19,
+                    layout: { visibility: 'none' }
                 }
             ]
         },
         center: CONFIG.defaultCenter,
-        zoom: CONFIG.defaultZoom
+        zoom: CONFIG.defaultZoom,
+        maxPitch: 85
     });
 
     // Add navigation controls
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
     map.addControl(new maplibregl.ScaleControl(), 'bottom-right');
 
-    // Add parcel source and layer when map loads
     map.on('load', () => {
+        // Add terrain DEM source
+        map.addSource('terrain-dem', {
+            type: 'raster-dem',
+            url: CONFIG.terrainUrl,
+            tileSize: 256
+        });
+
+        // Add hillshade layer (hidden by default)
+        map.addLayer({
+            id: 'hillshade-layer',
+            type: 'hillshade',
+            source: 'terrain-dem',
+            paint: {
+                'hillshade-illumination-direction': 315,
+                'hillshade-exaggeration': 0.5,
+                'hillshade-shadow-color': '#473B24',
+                'hillshade-highlight-color': '#FDFCFA'
+            },
+            layout: { visibility: 'none' }
+        }, 'osm-layer');
+
         // Add empty parcel source
         map.addSource('parcels', {
             type: 'geojson',
             data: { type: 'FeatureCollection', features: [] }
+        });
+
+        // Add highlighted favorite source (for auto-highlight)
+        map.addSource('highlighted-favorite', {
+            type: 'geojson',
+            data: { type: 'FeatureCollection', features: [] }
+        });
+
+        // Highlighted favorite fill (behind regular parcels)
+        map.addLayer({
+            id: 'highlighted-favorite-fill',
+            type: 'fill',
+            source: 'highlighted-favorite',
+            paint: {
+                'fill-color': '#e11d48',
+                'fill-opacity': 0.4
+            }
+        });
+
+        // Highlighted favorite outline
+        map.addLayer({
+            id: 'highlighted-favorite-outline',
+            type: 'line',
+            source: 'highlighted-favorite',
+            paint: {
+                'line-color': '#e11d48',
+                'line-width': 4
+            }
         });
 
         // Parcel fill layer
@@ -123,13 +180,15 @@ function initMap() {
                 'fill-color': [
                     'case',
                     ['boolean', ['feature-state', 'selected'], false],
-                    '#e94560',
-                    '#4a90d9'
+                    '#e11d48',
+                    '#3b82f6'
                 ],
                 'fill-opacity': [
                     'case',
                     ['boolean', ['feature-state', 'hover'], false],
                     0.5,
+                    ['boolean', ['feature-state', 'selected'], false],
+                    0.4,
                     0.2
                 ]
             }
@@ -144,14 +203,14 @@ function initMap() {
                 'line-color': [
                     'case',
                     ['boolean', ['feature-state', 'selected'], false],
-                    '#e94560',
-                    '#4a90d9'
+                    '#e11d48',
+                    '#3b82f6'
                 ],
                 'line-width': [
                     'case',
                     ['boolean', ['feature-state', 'selected'], false],
                     3,
-                    1
+                    1.5
                 ]
             }
         });
@@ -208,7 +267,6 @@ async function loadParcelsInView() {
         const bounds = map.getBounds();
         const bbox = `${bounds.getWest()},${bounds.getSouth()},${bounds.getEast()},${bounds.getNorth()}`;
 
-        // Build query URL
         const params = new URLSearchParams({
             where: '1=1',
             geometry: bbox,
@@ -241,7 +299,13 @@ async function loadParcelsInView() {
 }
 
 function selectParcel(feature) {
-    selectedParcel = feature;
+    // Clear previous selection
+    if (selectedParcelId !== null) {
+        map.setFeatureState({ source: 'parcels', id: selectedParcelId }, { selected: false });
+    }
+
+    selectedParcelId = feature.id;
+    map.setFeatureState({ source: 'parcels', id: selectedParcelId }, { selected: true });
 
     // Update sidebar
     const infoSection = document.getElementById('parcel-info');
@@ -249,18 +313,18 @@ function selectParcel(feature) {
 
     const props = feature.properties;
 
-    // Calculate acreage if geometry available (VCGI uses ACRESGL)
+    // Calculate acreage
     let acres = props.ACRESGL || props.ACRES || props.GISAcres || props.Acreage;
     if (!acres && feature.geometry) {
         try {
             const area = turf.area(feature);
-            acres = (area / 4046.86).toFixed(2); // sq meters to acres
+            acres = (area / 4046.86).toFixed(2);
         } catch (e) {
             acres = 'N/A';
         }
     }
 
-    // Build details HTML (VCGI field names: TNAME, SPAN, OWNER1, ACRESGL, E911ADDR, LAND_LV, REAL_FLV)
+    // Build details HTML
     detailsDiv.innerHTML = `
         <div class="field">
             <span class="label">Town</span>
@@ -284,34 +348,15 @@ function selectParcel(feature) {
         </div>
         <div class="field">
             <span class="label">Land Value</span>
-            <span class="value">${props.LAND_LV ? '$' + Number(props.LAND_LV).toLocaleString() : (props.LANDVALUE ? '$' + Number(props.LANDVALUE).toLocaleString() : 'N/A')}</span>
+            <span class="value">${props.LAND_LV ? '$' + Number(props.LAND_LV).toLocaleString() : 'N/A'}</span>
         </div>
         <div class="field">
             <span class="label">Total Value</span>
-            <span class="value">${props.REAL_FLV ? '$' + Number(props.REAL_FLV).toLocaleString() : (props.TOTALVALUE ? '$' + Number(props.TOTALVALUE).toLocaleString() : 'N/A')}</span>
+            <span class="value">${props.REAL_FLV ? '$' + Number(props.REAL_FLV).toLocaleString() : 'N/A'}</span>
         </div>
     `;
 
     infoSection.style.display = 'block';
-
-    // Show popup on map
-    const center = turf.center(feature);
-    const coords = center.geometry.coordinates;
-
-    new maplibregl.Popup()
-        .setLngLat(coords)
-        .setHTML(`
-            <div class="popup-title">${props.TNAME || props.TOWNNAME || props.Town || 'Parcel'}</div>
-            <div class="popup-field">
-                <span class="popup-label">Acres:</span>
-                <span class="popup-value">${acres}</span>
-            </div>
-            <div class="popup-field">
-                <span class="popup-label">Value:</span>
-                <span class="popup-value">${props.TOTALVALUE ? '$' + Number(props.TOTALVALUE).toLocaleString() : 'N/A'}</span>
-            </div>
-        `)
-        .addTo(map);
 }
 
 function initEventListeners() {
@@ -324,35 +369,36 @@ function initEventListeners() {
     // Filters
     document.getElementById('apply-filters').addEventListener('click', applyFilters);
 
-    // Layers
+    // Layer toggles
     document.getElementById('layer-parcels').addEventListener('change', (e) => {
         const visibility = e.target.checked ? 'visible' : 'none';
         map.setLayoutProperty('parcels-fill', 'visibility', visibility);
         map.setLayoutProperty('parcels-outline', 'visibility', visibility);
+        map.setLayoutProperty('highlighted-favorite-fill', 'visibility', visibility);
+        map.setLayoutProperty('highlighted-favorite-outline', 'visibility', visibility);
     });
 
     document.getElementById('layer-terrain').addEventListener('change', (e) => {
         if (e.target.checked) {
-            // Switch to terrain style
-            if (!map.getSource('stadia-terrain')) {
-                map.addSource('stadia-terrain', {
-                    type: 'raster',
-                    tiles: ['https://tiles.stadiamaps.com/tiles/stamen_terrain/{z}/{x}/{y}.png'],
-                    tileSize: 256
-                });
-            }
-            if (!map.getLayer('terrain-layer')) {
-                map.addLayer({
-                    id: 'terrain-layer',
-                    type: 'raster',
-                    source: 'stadia-terrain'
-                }, 'parcels-fill'); // Insert below parcels
-            }
+            // Enable 3D terrain
+            map.setTerrain({ source: 'terrain-dem', exaggeration: 1.5 });
+            map.setLayoutProperty('hillshade-layer', 'visibility', 'visible');
+            // Tilt the map for 3D effect
+            map.easeTo({ pitch: 60, duration: 500 });
+        } else {
+            // Disable terrain
+            map.setTerrain(null);
+            map.setLayoutProperty('hillshade-layer', 'visibility', 'none');
+            map.easeTo({ pitch: 0, duration: 500 });
+        }
+    });
+
+    document.getElementById('layer-satellite').addEventListener('change', (e) => {
+        if (e.target.checked) {
+            map.setLayoutProperty('satellite-layer', 'visibility', 'visible');
             map.setLayoutProperty('osm-layer', 'visibility', 'none');
         } else {
-            if (map.getLayer('terrain-layer')) {
-                map.setLayoutProperty('terrain-layer', 'visibility', 'none');
-            }
+            map.setLayoutProperty('satellite-layer', 'visibility', 'none');
             map.setLayoutProperty('osm-layer', 'visibility', 'visible');
         }
     });
@@ -368,7 +414,6 @@ async function performSearch() {
     showLoading(true);
 
     try {
-        // Search by town name (TNAME), SPAN, or address (E911ADDR) - VCGI field names
         const params = new URLSearchParams({
             where: `TNAME LIKE '%${query.toUpperCase()}%' OR SPAN LIKE '%${query}%' OR E911ADDR LIKE '%${query.toUpperCase()}%'`,
             outFields: '*',
@@ -382,16 +427,12 @@ async function performSearch() {
         const data = await response.json();
 
         if (data.features && data.features.length > 0) {
-            // Add IDs
             data.features.forEach((f, i) => f.id = i);
 
-            // Fit to results
             const bbox = turf.bbox({ type: 'FeatureCollection', features: data.features });
             map.fitBounds(bbox, { padding: 50 });
 
-            // Update source
             map.getSource('parcels').setData(data);
-
             console.log(`Found ${data.features.length} results`);
         } else {
             alert('No parcels found matching your search.');
@@ -409,37 +450,39 @@ function applyFilters() {
     const maxAcres = parseFloat(document.getElementById('max-acres').value) || 999999;
     const maxPrice = parseFloat(document.getElementById('max-price').value) || 999999999;
 
-    // Update layer filter (VCGI uses ACRESGL and REAL_FLV)
-    map.setFilter('parcels-fill', [
+    const filter = [
         'all',
         ['>=', ['to-number', ['get', 'ACRESGL'], 0], minAcres],
         ['<=', ['to-number', ['get', 'ACRESGL'], 999999], maxAcres],
         ['<=', ['to-number', ['get', 'REAL_FLV'], 0], maxPrice]
-    ]);
+    ];
 
-    map.setFilter('parcels-outline', [
-        'all',
-        ['>=', ['to-number', ['get', 'ACRESGL'], 0], minAcres],
-        ['<=', ['to-number', ['get', 'ACRESGL'], 999999], maxAcres],
-        ['<=', ['to-number', ['get', 'REAL_FLV'], 0], maxPrice]
-    ]);
+    map.setFilter('parcels-fill', filter);
+    map.setFilter('parcels-outline', filter);
 }
 
 function saveFavorite() {
-    if (!selectedParcel) return;
+    if (selectedParcelId === null) return;
 
-    const props = selectedParcel.properties;
+    // Get the selected feature from the source
+    const source = map.getSource('parcels');
+    const data = source._data;
+    const feature = data.features.find(f => f.id === selectedParcelId);
+
+    if (!feature) return;
+
+    const props = feature.properties;
     const favorite = {
         id: props.SPAN || props.ParcelID || Date.now().toString(),
         name: props.TNAME || props.TOWNNAME || props.Town || 'Unknown',
         address: props.E911ADDR || '',
         acres: props.ACRESGL || props.ACRES || 'N/A',
         value: props.REAL_FLV || props.TOTALVALUE,
-        geometry: selectedParcel.geometry,
+        span: props.SPAN,
+        geometry: feature.geometry,
         savedAt: new Date().toISOString()
     };
 
-    // Check if already saved
     if (favorites.find(f => f.id === favorite.id)) {
         alert('This parcel is already in your favorites.');
         return;
@@ -462,14 +505,14 @@ function renderFavorites() {
         <div class="favorite-item" data-id="${f.id}">
             <div>
                 <div class="name">${f.name}</div>
-                <div class="acres">${f.acres} acres${f.note ? ' - ' + f.note : ''}</div>
+                <div class="acres">${f.acres} acres</div>
                 ${f.address ? `<div class="address">${f.address}</div>` : ''}
             </div>
-            <span class="remove" onclick="removeFavorite('${f.id}')">✕</span>
+            <span class="remove" onclick="event.stopPropagation(); removeFavorite('${f.id}')">✕</span>
         </div>
     `).join('');
 
-    // Add click handlers to fly to favorite
+    // Add click handlers to fly to and highlight favorite
     container.querySelectorAll('.favorite-item').forEach(item => {
         item.addEventListener('click', async (e) => {
             if (e.target.classList.contains('remove')) return;
@@ -477,92 +520,77 @@ function renderFavorites() {
             const id = item.dataset.id;
             const fav = favorites.find(f => f.id === id);
             if (fav && fav.geometry) {
-                const center = turf.center({ type: 'Feature', geometry: fav.geometry });
-                map.flyTo({ center: center.geometry.coordinates, zoom: 15 });
+                // Highlight the favorite parcel immediately
+                highlightFavorite(fav);
 
-                // After flying, query VCGI for actual parcel at this location
-                await queryParcelAtLocation(center.geometry.coordinates, fav);
+                // Fit bounds to the parcel
+                const bbox = turf.bbox({ type: 'Feature', geometry: fav.geometry });
+                map.fitBounds(bbox, { padding: 100, maxZoom: 16, duration: 1000 });
             }
         });
     });
 }
 
-// Query VCGI for parcel at a specific location and highlight it
-async function queryParcelAtLocation(coords, favData) {
-    showLoading(true);
-
-    try {
-        // Create a small buffer around the point to query
-        const [lng, lat] = coords;
-        const buffer = 0.001; // ~100m buffer
-        const bbox = `${lng - buffer},${lat - buffer},${lng + buffer},${lat + buffer}`;
-
-        const params = new URLSearchParams({
-            where: '1=1',
-            geometry: bbox,
-            geometryType: 'esriGeometryEnvelope',
-            inSR: '4326',
-            outSR: '4326',
-            outFields: '*',
-            returnGeometry: 'true',
-            f: 'geojson',
-            resultRecordCount: 50
-        });
-
-        const response = await fetch(`${CONFIG.parcelServiceUrl}/query?${params}`);
-        const data = await response.json();
-
-        if (data.features && data.features.length > 0) {
-            // Find the parcel that matches our favorite (by address or acreage)
-            let targetParcel = data.features[0];
-
-            // Try to match by address if available
-            if (favData.address) {
-                const addrMatch = data.features.find(f =>
-                    f.properties.E911ADDR?.toUpperCase().includes(favData.address.toUpperCase().replace('0 ', ''))
-                );
-                if (addrMatch) targetParcel = addrMatch;
-            }
-
-            // Or match by closest acreage (VCGI uses ACRESGL)
-            if (favData.acres && typeof favData.acres === 'number') {
-                const acreMatch = data.features.reduce((closest, f) => {
-                    const fAcres = f.properties.ACRESGL || f.properties.ACRES || 0;
-                    const closestAcres = closest.properties.ACRESGL || closest.properties.ACRES || 0;
-                    return Math.abs(fAcres - favData.acres) < Math.abs(closestAcres - favData.acres) ? f : closest;
-                }, data.features[0]);
-                if (acreMatch) targetParcel = acreMatch;
-            }
-
-            // Add IDs and update source
-            data.features.forEach((f, i) => f.id = i);
-            map.getSource('parcels').setData(data);
-
-            // Select and show popup for the target parcel
-            selectParcel(targetParcel);
-
-            // Fit bounds to the target parcel
-            const bbox = turf.bbox(targetParcel);
-            map.fitBounds(bbox, { padding: 100, maxZoom: 16 });
-
-            console.log(`Found parcel: ${targetParcel.properties.E911ADDR}, ${targetParcel.properties.ACRES} acres`);
-        } else {
-            console.log('No parcels found at location, zooming out to load from view');
-            // Trigger a reload at current zoom
-            loadParcelsInView();
+function highlightFavorite(fav) {
+    // Update the highlighted favorite source
+    const feature = {
+        type: 'Feature',
+        geometry: fav.geometry,
+        properties: {
+            id: fav.id,
+            name: fav.name,
+            acres: fav.acres,
+            address: fav.address
         }
-    } catch (error) {
-        console.error('Error querying parcel at location:', error);
-        loadParcelsInView();
-    } finally {
-        showLoading(false);
-    }
+    };
+
+    map.getSource('highlighted-favorite').setData({
+        type: 'FeatureCollection',
+        features: [feature]
+    });
+
+    highlightedFavoriteId = fav.id;
+
+    // Show popup at center
+    const center = turf.center(feature);
+
+    // Remove existing popups
+    document.querySelectorAll('.maplibregl-popup').forEach(p => p.remove());
+
+    new maplibregl.Popup({ closeOnClick: false })
+        .setLngLat(center.geometry.coordinates)
+        .setHTML(`
+            <div class="popup-title">${fav.name}</div>
+            <div class="popup-field">
+                <span class="popup-label">Acres:</span>
+                <span class="popup-value">${fav.acres}</span>
+            </div>
+            ${fav.address ? `
+            <div class="popup-field">
+                <span class="popup-label">Address:</span>
+                <span class="popup-value">${fav.address}</span>
+            </div>
+            ` : ''}
+            ${fav.note ? `
+            <div class="popup-field" style="flex-direction: column; gap: 4px;">
+                <span class="popup-label">Note:</span>
+                <span class="popup-value" style="text-align: left;">${fav.note}</span>
+            </div>
+            ` : ''}
+        `)
+        .addTo(map);
 }
 
 function removeFavorite(id) {
     favorites = favorites.filter(f => f.id !== id);
     localStorage.setItem('plotViewer_favorites', JSON.stringify(favorites));
     renderFavorites();
+
+    // Clear highlight if removing the highlighted one
+    if (highlightedFavoriteId === id) {
+        map.getSource('highlighted-favorite').setData({ type: 'FeatureCollection', features: [] });
+        highlightedFavoriteId = null;
+    }
 }
 
 function showLoading(show) {
