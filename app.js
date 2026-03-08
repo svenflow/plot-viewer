@@ -25,7 +25,33 @@ const CONFIG = {
 // State
 let map = null;
 let selectedParcel = null;
-let favorites = JSON.parse(localStorage.getItem('plotViewer_favorites') || '[]');
+
+// Default favorites (preset parcels of interest)
+const DEFAULT_FAVORITES = [
+    {
+        id: 'blackmer-56',
+        name: 'STOCKBRIDGE',
+        address: '0 Blackmer Blvd',
+        acres: 56.5,
+        value: 149999,
+        geometry: {
+            type: 'Point',
+            coordinates: [-72.749851923370358, 43.777188827995168]
+        },
+        note: '56.5 acre parcel - Stockbridge VT',
+        savedAt: '2026-03-08T00:00:00.000Z'
+    }
+];
+
+// Merge defaults with localStorage (don't duplicate)
+let storedFavorites = JSON.parse(localStorage.getItem('plotViewer_favorites') || '[]');
+let favorites = [...DEFAULT_FAVORITES];
+storedFavorites.forEach(f => {
+    if (!favorites.find(df => df.id === f.id)) {
+        favorites.push(f);
+    }
+});
+localStorage.setItem('plotViewer_favorites', JSON.stringify(favorites));
 
 // Initialize
 document.addEventListener('DOMContentLoaded', init);
@@ -435,7 +461,8 @@ function renderFavorites() {
         <div class="favorite-item" data-id="${f.id}">
             <div>
                 <div class="name">${f.name}</div>
-                <div class="acres">${f.acres} acres</div>
+                <div class="acres">${f.acres} acres${f.note ? ' - ' + f.note : ''}</div>
+                ${f.address ? `<div class="address">${f.address}</div>` : ''}
             </div>
             <span class="remove" onclick="removeFavorite('${f.id}')">✕</span>
         </div>
