@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plot Viewer - Vermont Property Search</title>
+    <link href="https://unpkg.com/maplibre-gl@4.1.2/dist/maplibre-gl.css" rel="stylesheet" />
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <nav id="sidebar">
+            <h1>🗺️ Plot Viewer</h1>
+            <p class="subtitle">Vermont Property Search</p>
+
+            <div class="section">
+                <h2>Search</h2>
+                <input type="text" id="search-input" placeholder="Town, address, or SPAN...">
+                <button id="search-btn">Search</button>
+            </div>
+
+            <div class="section">
+                <h2>Filters</h2>
+                <label>
+                    Min Acres
+                    <input type="number" id="min-acres" placeholder="0" min="0">
+                </label>
+                <label>
+                    Max Acres
+                    <input type="number" id="max-acres" placeholder="1000">
+                </label>
+                <label>
+                    Max Price
+                    <input type="number" id="max-price" placeholder="500000">
+                </label>
+                <button id="apply-filters">Apply Filters</button>
+            </div>
+
+            <div class="section">
+                <h2>Layers</h2>
+                <label class="checkbox">
+                    <input type="checkbox" id="layer-parcels" checked>
+                    Parcel Boundaries
+                </label>
+                <label class="checkbox">
+                    <input type="checkbox" id="layer-terrain">
+                    Terrain/Hillshade
+                </label>
+            </div>
+
+            <div class="section" id="parcel-info" style="display: none;">
+                <h2>Selected Parcel</h2>
+                <div id="parcel-details"></div>
+                <button id="save-favorite">⭐ Save to Favorites</button>
+            </div>
+
+            <div class="section">
+                <h2>Favorites</h2>
+                <div id="favorites-list">
+                    <p class="empty">No favorites yet</p>
+                </div>
+            </div>
+
+            <div class="section credits">
+                <p>Data: <a href="https://geodata.vermont.gov/pages/parcels" target="_blank">VCGI</a></p>
+                <p>Maps: <a href="https://maplibre.org/" target="_blank">MapLibre</a></p>
+            </div>
+        </nav>
+
+        <main id="map-container">
+            <div id="map"></div>
+            <div id="loading" class="hidden">
+                <div class="spinner"></div>
+                <p>Loading parcels...</p>
+            </div>
+        </main>
+    </div>
+
+    <script src="https://unpkg.com/maplibre-gl@4.1.2/dist/maplibre-gl.js"></script>
+    <script src="https://unpkg.com/@turf/turf@7/turf.min.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

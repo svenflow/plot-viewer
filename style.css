@@ -1,0 +1,328 @@
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #1a1a2e;
+    color: #eee;
+}
+
+#app {
+    display: flex;
+    height: 100vh;
+}
+
+/* Sidebar */
+#sidebar {
+    width: 320px;
+    background: #16213e;
+    padding: 20px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    border-right: 1px solid #0f3460;
+}
+
+#sidebar h1 {
+    font-size: 1.5rem;
+    color: #e94560;
+}
+
+#sidebar .subtitle {
+    color: #888;
+    font-size: 0.9rem;
+    margin-top: -8px;
+}
+
+.section {
+    background: #1a1a2e;
+    padding: 16px;
+    border-radius: 8px;
+    border: 1px solid #0f3460;
+}
+
+.section h2 {
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #e94560;
+    margin-bottom: 12px;
+}
+
+/* Form elements */
+input[type="text"],
+input[type="number"] {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #0f3460;
+    border-radius: 6px;
+    background: #16213e;
+    color: #eee;
+    font-size: 0.95rem;
+    margin-bottom: 8px;
+}
+
+input[type="text"]:focus,
+input[type="number"]:focus {
+    outline: none;
+    border-color: #e94560;
+}
+
+input::placeholder {
+    color: #666;
+}
+
+button {
+    width: 100%;
+    padding: 10px 16px;
+    border: none;
+    border-radius: 6px;
+    background: #e94560;
+    color: white;
+    font-size: 0.95rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+button:hover {
+    background: #ff6b6b;
+}
+
+button:active {
+    transform: scale(0.98);
+}
+
+label {
+    display: block;
+    font-size: 0.85rem;
+    color: #aaa;
+    margin-bottom: 4px;
+}
+
+.checkbox {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    padding: 6px 0;
+}
+
+.checkbox input {
+    width: 16px;
+    height: 16px;
+    accent-color: #e94560;
+}
+
+/* Parcel info */
+#parcel-details {
+    font-size: 0.9rem;
+    line-height: 1.6;
+}
+
+#parcel-details .field {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    border-bottom: 1px solid #0f3460;
+}
+
+#parcel-details .field:last-child {
+    border-bottom: none;
+}
+
+#parcel-details .label {
+    color: #888;
+}
+
+#parcel-details .value {
+    color: #fff;
+    font-weight: 500;
+    text-align: right;
+}
+
+#save-favorite {
+    margin-top: 12px;
+    background: #0f3460;
+}
+
+#save-favorite:hover {
+    background: #1a4a7a;
+}
+
+/* Favorites list */
+#favorites-list {
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+#favorites-list .empty {
+    color: #666;
+    font-size: 0.85rem;
+    font-style: italic;
+}
+
+.favorite-item {
+    padding: 8px;
+    background: #0f3460;
+    border-radius: 6px;
+    margin-bottom: 6px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.favorite-item:hover {
+    background: #1a4a7a;
+}
+
+.favorite-item .name {
+    font-weight: 500;
+}
+
+.favorite-item .acres {
+    color: #888;
+    font-size: 0.85rem;
+}
+
+.favorite-item .remove {
+    color: #e94560;
+    cursor: pointer;
+    padding: 4px 8px;
+}
+
+/* Credits */
+.credits {
+    margin-top: auto;
+    background: transparent;
+    border: none;
+    padding: 8px;
+}
+
+.credits p {
+    font-size: 0.8rem;
+    color: #666;
+}
+
+.credits a {
+    color: #e94560;
+    text-decoration: none;
+}
+
+.credits a:hover {
+    text-decoration: underline;
+}
+
+/* Map */
+#map-container {
+    flex: 1;
+    position: relative;
+}
+
+#map {
+    width: 100%;
+    height: 100%;
+}
+
+/* Loading overlay */
+#loading {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(26, 26, 46, 0.9);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+#loading.hidden {
+    display: none;
+}
+
+.spinner {
+    width: 48px;
+    height: 48px;
+    border: 4px solid #0f3460;
+    border-top-color: #e94560;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* MapLibre popup styling */
+.maplibregl-popup-content {
+    background: #16213e !important;
+    color: #eee !important;
+    border-radius: 8px !important;
+    padding: 16px !important;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4) !important;
+    max-width: 300px !important;
+}
+
+.maplibregl-popup-tip {
+    border-top-color: #16213e !important;
+}
+
+.maplibregl-popup-close-button {
+    color: #888 !important;
+    font-size: 20px !important;
+    padding: 8px !important;
+}
+
+.maplibregl-popup-close-button:hover {
+    color: #e94560 !important;
+    background: transparent !important;
+}
+
+.popup-title {
+    font-weight: 600;
+    font-size: 1.1rem;
+    margin-bottom: 8px;
+    color: #e94560;
+}
+
+.popup-field {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 0.9rem;
+}
+
+.popup-label {
+    color: #888;
+}
+
+.popup-value {
+    font-weight: 500;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    #app {
+        flex-direction: column;
+    }
+
+    #sidebar {
+        width: 100%;
+        height: auto;
+        max-height: 40vh;
+        border-right: none;
+        border-bottom: 1px solid #0f3460;
+    }
+
+    #map-container {
+        height: 60vh;
+    }
+}

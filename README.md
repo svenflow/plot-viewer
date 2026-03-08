@@ -37,16 +37,18 @@ Static property parcel visualization for land purchasing research. Runs entirely
 | [ATTOM](https://www.attomdata.com/) | Contact for pricing | Property data API, free trial |
 | [RentCast](https://www.rentcast.io/api) | 50 free calls/month | Property data |
 
-## Features (Planned)
+## Features
 
-- [ ] Parcel boundaries overlay
-- [ ] Click parcel → popup with metadata
+- [x] Parcel boundaries overlay (VCGI live data)
+- [x] Click parcel → popup with metadata
+- [x] Filter by acreage and price
+- [x] Save favorites to localStorage
+- [x] Terrain/hillshade toggle
+- [x] Search by town, address, or SPAN
 - [ ] Price per acre heatmap
-- [ ] Filter by price/acreage/town
 - [ ] Days on market visualization
 - [ ] Road frontage highlighting
 - [ ] Slope/terrain analysis
-- [ ] Save favorites to localStorage
 - [ ] Side-by-side compare mode
 
 ## Architecture
