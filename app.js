@@ -10,8 +10,8 @@
 
 // Configuration
 const CONFIG = {
-    // VCGI Parcel Feature Service
-    parcelServiceUrl: 'https://services2.arcgis.com/wEula7SYiezXcdRv/arcgis/rest/services/Parcel_Information_Public_Map_View/FeatureServer/11',
+    // VCGI Parcel Feature Service (Vermont standardized parcels)
+    parcelServiceUrl: 'https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services/FS_VCGI_OPENDATA_Cadastral_VTPARCELS_poly_standardized_parcels_SP_v1/FeatureServer/0',
 
     // Map settings
     defaultCenter: [-72.7, 44.0], // Vermont center
@@ -248,8 +248,8 @@ function selectParcel(feature) {
 
     const props = feature.properties;
 
-    // Calculate acreage if geometry available
-    let acres = props.ACRES || props.GISAcres || props.Acreage;
+    // Calculate acreage if geometry available (VCGI uses ACRESGL)
+    let acres = props.ACRESGL || props.ACRES || props.GISAcres || props.Acreage;
     if (!acres && feature.geometry) {
         try {
             const area = turf.area(feature);
@@ -259,11 +259,11 @@ function selectParcel(feature) {
         }
     }
 
-    // Build details HTML
+    // Build details HTML (VCGI field names: TNAME, SPAN, OWNER1, ACRESGL, E911ADDR, LAND_LV, REAL_FLV)
     detailsDiv.innerHTML = `
         <div class="field">
             <span class="label">Town</span>
-            <span class="value">${props.TOWNNAME || props.Town || 'N/A'}</span>
+            <span class="value">${props.TNAME || props.TOWNNAME || props.Town || 'N/A'}</span>
         </div>
         <div class="field">
             <span class="label">SPAN</span>
@@ -283,11 +283,11 @@ function selectParcel(feature) {
         </div>
         <div class="field">
             <span class="label">Land Value</span>
-            <span class="value">${props.LANDVALUE ? '$' + Number(props.LANDVALUE).toLocaleString() : 'N/A'}</span>
+            <span class="value">${props.LAND_LV ? '$' + Number(props.LAND_LV).toLocaleString() : (props.LANDVALUE ? '$' + Number(props.LANDVALUE).toLocaleString() : 'N/A')}</span>
         </div>
         <div class="field">
             <span class="label">Total Value</span>
-            <span class="value">${props.TOTALVALUE ? '$' + Number(props.TOTALVALUE).toLocaleString() : 'N/A'}</span>
+            <span class="value">${props.REAL_FLV ? '$' + Number(props.REAL_FLV).toLocaleString() : (props.TOTALVALUE ? '$' + Number(props.TOTALVALUE).toLocaleString() : 'N/A')}</span>
         </div>
     `;
 
@@ -300,7 +300,7 @@ function selectParcel(feature) {
     new maplibregl.Popup()
         .setLngLat(coords)
         .setHTML(`
-            <div class="popup-title">${props.TOWNNAME || props.Town || 'Parcel'}</div>
+            <div class="popup-title">${props.TNAME || props.TOWNNAME || props.Town || 'Parcel'}</div>
             <div class="popup-field">
                 <span class="popup-label">Acres:</span>
                 <span class="popup-value">${acres}</span>
@@ -367,9 +367,9 @@ async function performSearch() {
     showLoading(true);
 
     try {
-        // Search by town name or SPAN
+        // Search by town name (TNAME), SPAN, or address (E911ADDR) - VCGI field names
         const params = new URLSearchParams({
-            where: `TOWNNAME LIKE '%${query.toUpperCase()}%' OR SPAN LIKE '%${query}%' OR E911ADDR LIKE '%${query.toUpperCase()}%'`,
+            where: `TNAME LIKE '%${query.toUpperCase()}%' OR SPAN LIKE '%${query}%' OR E911ADDR LIKE '%${query.toUpperCase()}%'`,
             outFields: '*',
             returnGeometry: 'true',
             outSR: '4326',
@@ -408,19 +408,19 @@ function applyFilters() {
     const maxAcres = parseFloat(document.getElementById('max-acres').value) || 999999;
     const maxPrice = parseFloat(document.getElementById('max-price').value) || 999999999;
 
-    // Update layer filter
+    // Update layer filter (VCGI uses ACRESGL and REAL_FLV)
     map.setFilter('parcels-fill', [
         'all',
-        ['>=', ['to-number', ['get', 'ACRES'], 0], minAcres],
-        ['<=', ['to-number', ['get', 'ACRES'], 999999], maxAcres],
-        ['<=', ['to-number', ['get', 'TOTALVALUE'], 0], maxPrice]
+        ['>=', ['to-number', ['get', 'ACRESGL'], 0], minAcres],
+        ['<=', ['to-number', ['get', 'ACRESGL'], 999999], maxAcres],
+        ['<=', ['to-number', ['get', 'REAL_FLV'], 0], maxPrice]
     ]);
 
     map.setFilter('parcels-outline', [
         'all',
-        ['>=', ['to-number', ['get', 'ACRES'], 0], minAcres],
-        ['<=', ['to-number', ['get', 'ACRES'], 999999], maxAcres],
-        ['<=', ['to-number', ['get', 'TOTALVALUE'], 0], maxPrice]
+        ['>=', ['to-number', ['get', 'ACRESGL'], 0], minAcres],
+        ['<=', ['to-number', ['get', 'ACRESGL'], 999999], maxAcres],
+        ['<=', ['to-number', ['get', 'REAL_FLV'], 0], maxPrice]
     ]);
 }
 
@@ -430,10 +430,10 @@ function saveFavorite() {
     const props = selectedParcel.properties;
     const favorite = {
         id: props.SPAN || props.ParcelID || Date.now().toString(),
-        name: props.TOWNNAME || props.Town || 'Unknown',
+        name: props.TNAME || props.TOWNNAME || props.Town || 'Unknown',
         address: props.E911ADDR || '',
-        acres: props.ACRES || 'N/A',
-        value: props.TOTALVALUE,
+        acres: props.ACRESGL || props.ACRES || 'N/A',
+        value: props.REAL_FLV || props.TOTALVALUE,
         geometry: selectedParcel.geometry,
         savedAt: new Date().toISOString()
     };
@@ -523,11 +523,11 @@ async function queryParcelAtLocation(coords, favData) {
                 if (addrMatch) targetParcel = addrMatch;
             }
 
-            // Or match by closest acreage
+            // Or match by closest acreage (VCGI uses ACRESGL)
             if (favData.acres && typeof favData.acres === 'number') {
                 const acreMatch = data.features.reduce((closest, f) => {
-                    const fAcres = f.properties.ACRES || 0;
-                    const closestAcres = closest.properties.ACRES || 0;
+                    const fAcres = f.properties.ACRESGL || f.properties.ACRES || 0;
+                    const closestAcres = closest.properties.ACRESGL || closest.properties.ACRES || 0;
                     return Math.abs(fAcres - favData.acres) < Math.abs(closestAcres - favData.acres) ? f : closest;
                 }, data.features[0]);
                 if (acreMatch) targetParcel = acreMatch;
