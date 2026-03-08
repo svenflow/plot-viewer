@@ -470,17 +470,92 @@ function renderFavorites() {
 
     // Add click handlers to fly to favorite
     container.querySelectorAll('.favorite-item').forEach(item => {
-        item.addEventListener('click', (e) => {
+        item.addEventListener('click', async (e) => {
             if (e.target.classList.contains('remove')) return;
 
             const id = item.dataset.id;
             const fav = favorites.find(f => f.id === id);
             if (fav && fav.geometry) {
                 const center = turf.center({ type: 'Feature', geometry: fav.geometry });
-                map.flyTo({ center: center.geometry.coordinates, zoom: 16 });
+                map.flyTo({ center: center.geometry.coordinates, zoom: 15 });
+
+                // After flying, query VCGI for actual parcel at this location
+                await queryParcelAtLocation(center.geometry.coordinates, fav);
             }
         });
     });
+}
+
+// Query VCGI for parcel at a specific location and highlight it
+async function queryParcelAtLocation(coords, favData) {
+    showLoading(true);
+
+    try {
+        // Create a small buffer around the point to query
+        const [lng, lat] = coords;
+        const buffer = 0.001; // ~100m buffer
+        const bbox = `${lng - buffer},${lat - buffer},${lng + buffer},${lat + buffer}`;
+
+        const params = new URLSearchParams({
+            where: '1=1',
+            geometry: bbox,
+            geometryType: 'esriGeometryEnvelope',
+            inSR: '4326',
+            outSR: '4326',
+            outFields: '*',
+            returnGeometry: 'true',
+            f: 'geojson',
+            resultRecordCount: 50
+        });
+
+        const response = await fetch(`${CONFIG.parcelServiceUrl}/query?${params}`);
+        const data = await response.json();
+
+        if (data.features && data.features.length > 0) {
+            // Find the parcel that matches our favorite (by address or acreage)
+            let targetParcel = data.features[0];
+
+            // Try to match by address if available
+            if (favData.address) {
+                const addrMatch = data.features.find(f =>
+                    f.properties.E911ADDR?.toUpperCase().includes(favData.address.toUpperCase().replace('0 ', ''))
+                );
+                if (addrMatch) targetParcel = addrMatch;
+            }
+
+            // Or match by closest acreage
+            if (favData.acres && typeof favData.acres === 'number') {
+                const acreMatch = data.features.reduce((closest, f) => {
+                    const fAcres = f.properties.ACRES || 0;
+                    const closestAcres = closest.properties.ACRES || 0;
+                    return Math.abs(fAcres - favData.acres) < Math.abs(closestAcres - favData.acres) ? f : closest;
+                }, data.features[0]);
+                if (acreMatch) targetParcel = acreMatch;
+            }
+
+            // Add IDs and update source
+            data.features.forEach((f, i) => f.id = i);
+            map.getSource('parcels').setData(data);
+
+            // Select and show popup for the target parcel
+            selectParcel(targetParcel);
+
+            // Fit bounds to the target parcel
+            const bbox = turf.bbox(targetParcel);
+            map.fitBounds(bbox, { padding: 100, maxZoom: 16 });
+
+            console.log(`Found parcel: ${targetParcel.properties.E911ADDR}, ${targetParcel.properties.ACRES} acres`);
+        } else {
+            console.log('No parcels found at location, zooming out to load from view');
+            // Trigger a reload at current zoom
+            loadParcelsInView();
+        }
+    } catch (error) {
+        console.error('Error querying parcel at location:', error);
+        loadParcelsInView();
+    } finally {
+        showLoading(false);
+    }
 }
 
 function removeFavorite(id) {
