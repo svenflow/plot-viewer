@@ -448,6 +448,9 @@ function selectParcel(feature) {
         map.setFeatureState({ source: 'parcels', id: selectedParcelId }, { selected: false });
     }
 
+    // Clear listing parcel highlight when manually selecting
+    clearListingParcelHighlight();
+
     selectedParcelId = feature.id;
     map.setFeatureState({ source: 'parcels', id: selectedParcelId }, { selected: true });
 
@@ -914,12 +917,88 @@ function flyToListing(l) {
 
     map.flyTo({
         center: [l.lng, l.lat],
-        zoom: 14,
+        zoom: 15,  // Zoom in closer to see parcel
         duration: FLY_DURATION
     });
 
-    // Show popup after fly animation completes
-    setTimeout(() => showListingPopup(l), FLY_DURATION + 100);
+    // After fly, load parcels and find the one at this point
+    setTimeout(async () => {
+        showListingPopup(l);
+        // Query for parcel at this point and highlight it
+        await highlightParcelAtPoint(l.lng, l.lat);
+    }, FLY_DURATION + 100);
+}
+
+// Clear listing parcel highlight
+function clearListingParcelHighlight() {
+    if (map.getSource('listing-parcel')) {
+        map.getSource('listing-parcel').setData({
+            type: 'FeatureCollection',
+            features: []
+        });
+    }
+}
+
+// Query VCGI for parcel containing a point and highlight it
+async function highlightParcelAtPoint(lng, lat) {
+    try {
+        const params = new URLSearchParams({
+            geometry: `${lng},${lat}`,
+            geometryType: 'esriGeometryPoint',
+            inSR: '4326',
+            outSR: '4326',
+            spatialRel: 'esriSpatialRelIntersects',
+            outFields: '*',
+            returnGeometry: 'true',
+            f: 'geojson'
+        });
+
+        const response = await fetch(`${CONFIG.parcelServiceUrl}/query?${params}`);
+        const data = await response.json();
+
+        if (data.features && data.features.length > 0) {
+            const feature = data.features[0];
+            feature.id = feature.properties?.SPAN || 'listing-parcel';
+
+            // Add to highlighted source (separate from main parcels)
+            if (!map.getSource('listing-parcel')) {
+                map.addSource('listing-parcel', {
+                    type: 'geojson',
+                    data: { type: 'FeatureCollection', features: [feature] }
+                });
+
+                // Add highlight layer
+                map.addLayer({
+                    id: 'listing-parcel-fill',
+                    type: 'fill',
+                    source: 'listing-parcel',
+                    paint: {
+                        'fill-color': '#10b981',
+                        'fill-opacity': 0.3
+                    }
+                }, 'parcels-fill');
+
+                map.addLayer({
+                    id: 'listing-parcel-outline',
+                    type: 'line',
+                    source: 'listing-parcel',
+                    paint: {
+                        'line-color': '#10b981',
+                        'line-width': 3
+                    }
+                });
+            } else {
+                map.getSource('listing-parcel').setData({
+                    type: 'FeatureCollection',
+                    features: [feature]
+                });
+            }
+
+            console.log(`Highlighted parcel: ${feature.properties?.SPAN || 'unknown'}, ${feature.properties?.ACRESGL || '?'} acres`);
+        }
+    } catch (error) {
+        console.warn('Could not highlight parcel:', error);
+    }
 }
 
 function showLoading(show) {
