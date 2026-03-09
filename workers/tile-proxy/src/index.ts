@@ -20,7 +20,7 @@ interface Env {
 // Upstream base URLs
 const UPSTREAMS: Record<string, string> = {
   vcgi: "https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services",
-  terrain: "https://demotiles.maplibre.org/terrain-tiles",
+  terrain: "https://s3.amazonaws.com/elevation-tiles-prod/terrarium",
   satellite: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer",
   osm: "https://tile.openstreetmap.org",
 };

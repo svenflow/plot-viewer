@@ -20,9 +20,12 @@ const CONFIG = {
         ? `${PROXY_BASE}/vcgi/FS_VCGI_OPENDATA_Cadastral_VTPARCELS_poly_standardized_parcels_SP_v1/FeatureServer/0`
         : 'https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services/FS_VCGI_OPENDATA_Cadastral_VTPARCELS_poly_standardized_parcels_SP_v1/FeatureServer/0',
 
-    // MapLibre demo terrain tiles (Mapbox RGB encoding)
-    // Free, global coverage with proper CORS
-    terrainUrl: 'https://demotiles.maplibre.org/terrain-tiles/tiles.json',
+    // AWS Terrain Tiles - free, global coverage
+    // Uses "terrarium" encoding format (different from Mapbox RGB)
+    // Proxied through CF worker for CORS headers
+    terrainTiles: PROXY_BASE
+        ? [`${PROXY_BASE}/terrain/{z}/{x}/{y}.png`]
+        : ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
 
     // Map settings
     defaultCenter: [-72.7, 44.0], // Vermont center
@@ -147,12 +150,14 @@ function initMap() {
     map.addControl(new maplibregl.ScaleControl(), 'bottom-right');
 
     map.on('load', () => {
-        // Add terrain DEM source using TileJSON URL
-        // MapLibre demo tiles use default 'mapbox' encoding
+        // Add terrain DEM source using AWS terrarium tiles
+        // IMPORTANT: Must specify 'terrarium' encoding (not default 'mapbox')
         map.addSource('terrain-dem', {
             type: 'raster-dem',
-            url: CONFIG.terrainUrl,
-            tileSize: 256
+            tiles: CONFIG.terrainTiles,
+            tileSize: 256,
+            encoding: 'terrarium',
+            maxzoom: 15
         });
 
         // Add hillshade layer (hidden by default)
