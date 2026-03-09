@@ -30,6 +30,36 @@ from rich.table import Table
 
 console = Console()
 
+
+def get_google_api_key() -> str | None:
+    """Get Google API key from keychain."""
+    try:
+        result = subprocess.run(
+            ['security', 'find-generic-password', '-s', 'google-api-key', '-w'],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except:
+        pass
+    return None
+
+
+def geocode_address(address: str, api_key: str) -> tuple[float, float] | None:
+    """Geocode an address using Google Geocoding API."""
+    try:
+        url = "https://maps.googleapis.com/maps/api/geocode/json"
+        params = {"address": address, "key": api_key}
+        resp = httpx.get(url, params=params, timeout=10)
+        data = resp.json()
+        if data.get("results"):
+            loc = data["results"][0]["geometry"]["location"]
+            return (loc["lat"], loc["lng"])
+    except:
+        pass
+    return None
+
+
 # API endpoint
 API_URL = "https://plot-listings-api.nicklaudethorat.workers.dev"
 # For local dev:
@@ -127,6 +157,8 @@ def normalize_listing(listing: dict, source: str) -> dict:
             "beds": listing.get("beds"),
             "baths": listing.get("baths"),
             "sqft": listing.get("sqft"),
+            "lat": listing.get("lat"),
+            "lng": listing.get("lng"),
             "source_url": listing.get("url"),
             "property_type": "single_family",
         })
@@ -174,6 +206,7 @@ def main():
     parser.add_argument("--source", help="Only run specific scraper (zillow, redfin)")
     parser.add_argument("--dry-run", action="store_true", help="Preview without pushing")
     parser.add_argument("--api-url", help="Override API URL")
+    parser.add_argument("--geocode", action="store_true", help="Geocode addresses missing lat/lng")
     args = parser.parse_args()
 
     global API_URL
@@ -197,6 +230,24 @@ def main():
     if not all_listings:
         console.print("[yellow]No listings to sync[/yellow]")
         return 0
+
+    # Geocode listings missing lat/lng
+    if args.geocode:
+        api_key = get_google_api_key()
+        if api_key:
+            need_geocoding = [l for l in all_listings if not l.get("lat") or not l.get("lng")]
+            if need_geocoding:
+                console.print(f"[cyan]Geocoding {len(need_geocoding)} addresses...[/cyan]")
+                for i, l in enumerate(need_geocoding[:50]):  # Limit to 50 to avoid API quota
+                    addr = l.get("address")
+                    if addr:
+                        coords = geocode_address(addr, api_key)
+                        if coords:
+                            l["lat"], l["lng"] = coords
+                            console.print(f"  [dim]{i+1}/{len(need_geocoding)}: {addr[:40]}... -> {coords[0]:.4f}, {coords[1]:.4f}[/dim]")
+                console.print(f"[green]Geocoding complete[/green]")
+        else:
+            console.print("[yellow]No Google API key found, skipping geocoding[/yellow]")
 
     # Show preview
     table = Table(title="Listings to sync")

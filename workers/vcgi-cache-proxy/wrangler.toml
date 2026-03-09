@@ -1,0 +1,7 @@
+name = "vcgi-cache-proxy"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+[vars]
+VCGI_BASE_URL = "https://maps.vcgi.vermont.gov/arcgis/rest/services/EGC_services/OPENDATA_VCGI_CADASTRAL_SP_NOCACHE_v2/MapServer"
+CACHE_TTL_SECONDS = "86400"  # 24 hours

@@ -78,6 +78,50 @@ def parse_redfin_html(html: str) -> list[dict]:
     """Parse Redfin HTML to extract property listings."""
     results = []
 
+    # Try to find the JSON data embedded in the page first (has lat/lng)
+    # Redfin embeds listing data in script tags as JSON
+    json_patterns = [
+        r'window\.__reactServerState\s*=\s*({.*?});',
+        r'"homes":\s*(\[.*?\])',
+        r'window\.reactServerAgentState\s*=\s*({.*?});',
+    ]
+
+    # Try to extract lat/lng from the page's JSON data
+    lat_lng_by_id = {}
+    for pattern in json_patterns:
+        match = re.search(pattern, html, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(1))
+                # Navigate to homes data
+                homes = None
+                if isinstance(data, list):
+                    homes = data
+                elif isinstance(data, dict):
+                    # Try common paths
+                    for key in ['homes', 'searchResults', 'properties']:
+                        if key in data:
+                            homes = data[key]
+                            break
+                    if not homes and 'payload' in data:
+                        homes = data['payload'].get('homes', [])
+
+                if homes:
+                    for home in homes:
+                        if isinstance(home, dict):
+                            home_id = str(home.get('propertyId', home.get('mlsId', home.get('listingId', ''))))
+                            lat = home.get('latitude') or home.get('lat')
+                            lng = home.get('longitude') or home.get('lng') or home.get('lon')
+                            if home_id and lat and lng:
+                                lat_lng_by_id[home_id] = (lat, lng)
+            except:
+                pass
+
+    # Alternative: extract individual lat/lng from data attributes
+    # Pattern: data-latitude="44.123" data-longitude="-72.456"
+    lat_matches = re.findall(r'data-latitude="([\d.-]+)"', html)
+    lng_matches = re.findall(r'data-longitude="([\d.-]+)"', html)
+
     # Find all HomeCard blocks with their content
     # Pattern: HomeCardContainer div containing price, address, stats, and link
     card_pattern = r'<div[^>]*class="[^"]*HomeCardContainer[^"]*"[^>]*>(.*?)</article>'
@@ -113,6 +157,17 @@ def parse_redfin_html(html: str) -> list[dict]:
                 'home_id': home_id,
                 'city': city_name,
             }
+
+            # Add lat/lng if we found it in JSON
+            if home_id in lat_lng_by_id:
+                result['lat'], result['lng'] = lat_lng_by_id[home_id]
+            elif i < len(lat_matches) and i < len(lng_matches):
+                # Use position-based matching as fallback
+                try:
+                    result['lat'] = float(lat_matches[i])
+                    result['lng'] = float(lng_matches[i])
+                except:
+                    pass
 
             # Add price if available (prices appear before links in DOM)
             if i < len(prices):

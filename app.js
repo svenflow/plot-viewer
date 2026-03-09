@@ -39,6 +39,9 @@ const CONFIG = {
 
     // Listings API (new D1-based)
     listingsApiUrl: 'https://plot-listings-api.nicklaudethorat.workers.dev',
+
+    // VCGI Cache Proxy for parcel point queries (with caching)
+    vcgiCacheProxyUrl: 'https://vcgi-cache-proxy.nicklaudethorat.workers.dev',
 };
 
 // Favorite status colors
@@ -955,20 +958,12 @@ function clearListingParcelHighlight() {
 
 // Query VCGI for parcel containing a point and highlight it
 // If listingId is provided, save VCGI data to the listings API
+// Uses the VCGI cache proxy for caching and resilience
 async function highlightParcelAtPoint(lng, lat, listingId = null) {
     try {
-        const params = new URLSearchParams({
-            geometry: `${lng},${lat}`,
-            geometryType: 'esriGeometryPoint',
-            inSR: '4326',
-            outSR: '4326',
-            spatialRel: 'esriSpatialRelIntersects',
-            outFields: '*',
-            returnGeometry: 'true',
-            f: 'geojson'
-        });
-
-        const response = await fetch(`${CONFIG.parcelServiceUrl}/query?${params}`);
+        // Use the cache proxy for parcel queries
+        const proxyUrl = `${CONFIG.vcgiCacheProxyUrl}/parcel?lat=${lat}&lng=${lng}`;
+        const response = await fetch(proxyUrl);
         const data = await response.json();
 
         if (data.features && data.features.length > 0) {
