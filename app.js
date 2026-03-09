@@ -20,11 +20,9 @@ const CONFIG = {
         ? `${PROXY_BASE}/vcgi/FS_VCGI_OPENDATA_Cadastral_VTPARCELS_poly_standardized_parcels_SP_v1/FeatureServer/0`
         : 'https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services/FS_VCGI_OPENDATA_Cadastral_VTPARCELS_poly_standardized_parcels_SP_v1/FeatureServer/0',
 
-    // MapLibre demo terrain tiles (free, no API key)
-    // In production, proxied through Cloudflare for caching
-    terrainUrl: PROXY_BASE
-        ? `${PROXY_BASE}/terrain/tiles.json`
-        : 'https://demotiles.maplibre.org/terrain-tiles/tiles.json',
+    // AWS Terrain Tiles - free, global coverage, includes US
+    // Uses "terrarium" encoding format
+    terrainUrl: 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
 
     // Map settings
     defaultCenter: [-72.7, 44.0], // Vermont center
@@ -150,10 +148,14 @@ function initMap() {
 
     map.on('load', () => {
         // Add terrain DEM source
+        // CRITICAL: Must use 'tiles' array, NOT 'url' (which expects TileJSON)
+        // Must also specify 'encoding: terrarium' for AWS elevation tiles
         map.addSource('terrain-dem', {
             type: 'raster-dem',
-            url: CONFIG.terrainUrl,
-            tileSize: 256
+            tiles: [CONFIG.terrainUrl],
+            tileSize: 256,
+            encoding: 'terrarium',
+            maxzoom: 15
         });
 
         // Add hillshade layer (hidden by default)
