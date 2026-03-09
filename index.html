@@ -96,9 +96,17 @@
                 </div>
 
                 <div class="section">
-                    <h2>Favorites</h2>
-                    <div id="favorites-list">
-                        <p class="empty">No favorites yet</p>
+                    <h2>Listings <span id="listings-count" style="font-size: 0.8em; color: #888;"></span></h2>
+                    <div id="listings-filters" style="margin-bottom: 12px;">
+                        <select id="listings-state" style="padding: 6px; border-radius: 4px; border: 1px solid #333; background: #1a1a1a; color: #fff;">
+                            <option value="VT">Vermont</option>
+                            <option value="NH">New Hampshire</option>
+                            <option value="ME">Maine</option>
+                        </select>
+                        <button id="refresh-listings" style="padding: 6px 12px; margin-left: 8px;">🔄</button>
+                    </div>
+                    <div id="listings-list">
+                        <p class="empty">Loading listings...</p>
                     </div>
                 </div>
             </div>
@@ -123,6 +131,6 @@
 
     <script src="https://unpkg.com/maplibre-gl@4.1.2/dist/maplibre-gl.js"></script>
     <!-- No more Turf.js - using built-in geometry calculations -->
-    <script src="app.js?v=20260309b"></script>
+    <script src="app.js?v=20260309e"></script>
 </body>
 </html>

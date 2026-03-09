@@ -4,7 +4,7 @@
  * Static property visualization using:
  * - MapLibre GL JS for rendering (with 3D terrain)
  * - VCGI ArcGIS Feature Service for Vermont parcel data
- * - LocalStorage for favorites persistence
+ * - Cloudflare KV for favorites persistence (via API)
  */
 
 // Proxy configuration - use Cloudflare Worker in production for caching
@@ -33,29 +33,120 @@ const CONFIG = {
     maxRecords: 1000,
     minZoomForParcels: 12,
     debounceMs: 300,
+
+    // Favorites API (legacy KV)
+    favoritesApiUrl: PROXY_BASE ? `${PROXY_BASE}/favorites` : null,
+
+    // Listings API (new D1-based)
+    listingsApiUrl: 'https://plot-listings-api.nicklaudethorat.workers.dev',
+};
+
+// Favorite status colors
+const STATUS_COLORS = {
+    'interested': '#3b82f6',  // Blue
+    'visited': '#f59e0b',     // Amber
+    'offer-made': '#8b5cf6',  // Purple
+    'purchased': '#10b981',   // Green
+    'rejected': '#6b7280',    // Gray
 };
 
 // State
 let map = null;
 let selectedParcelId = null;
-let highlightedFavoriteId = null;
+let highlightedListingId = null;
 let loadParcelsTimeout = null;
 let currentFetchController = null;
+let listingMarkers = []; // Map markers for listings
+let favoriteMarkers = []; // Map markers for legacy favorites
 
-// Load default favorites from JSON
+// Listings from D1 API
+let listings = [];
+
+// Legacy favorites (kept for backwards compatibility with parcel selection)
 let favorites = [];
 
 // Initialize
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
-    await loadDefaultFavorites();
     initMap();
     initEventListeners();
-    renderFavorites();
+    // Initialize listings UI and load listings after map is ready
+    map.on('load', () => {
+        initListingsUI();
+        loadListings();
+    });
+}
+
+// Simple debounce helper
+function debounce(fn, ms) {
+    let timer;
+    return (...args) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn(...args), ms);
+    };
+}
+
+// Validate coordinates are valid numbers in reasonable ranges
+function isValidCoord(lat, lng) {
+    return typeof lat === 'number' && typeof lng === 'number' &&
+           !isNaN(lat) && !isNaN(lng) &&
+           lat >= -90 && lat <= 90 &&
+           lng >= -180 && lng <= 180;
+}
+
+// Initialize listings UI event listeners
+function initListingsUI() {
+    document.getElementById('refresh-listings')?.addEventListener('click', loadListings);
+    // Debounce state changes to avoid rapid API calls
+    document.getElementById('listings-state')?.addEventListener('change', debounce(loadListings, 300));
+}
+
+// Load listings from D1 API
+async function loadListings() {
+    const state = document.getElementById('listings-state')?.value || 'VT';
+    const container = document.getElementById('listings-list');
+    const refreshBtn = document.getElementById('refresh-listings');
+
+    // Show loading state
+    container.innerHTML = '<p class="empty">Loading...</p>';
+    if (refreshBtn) refreshBtn.disabled = true;
+
+    try {
+        const response = await fetch(`${CONFIG.listingsApiUrl}/listings?state=${state}&status=active&limit=100`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const data = await response.json();
+        listings = data.listings || [];
+
+        document.getElementById('listings-count').textContent = `(${listings.length})`;
+        renderListings();
+        updateListingMarkers();
+
+    } catch (e) {
+        console.error('Failed to load listings:', e);
+        container.innerHTML = '<p class="empty">Failed to load listings</p>';
+    } finally {
+        if (refreshBtn) refreshBtn.disabled = false;
+    }
 }
 
 async function loadDefaultFavorites() {
+    // Try to load from API first (production)
+    if (CONFIG.favoritesApiUrl) {
+        try {
+            const response = await fetch(CONFIG.favoritesApiUrl);
+            if (response.ok) {
+                favorites = await response.json();
+                console.log(`Loaded ${favorites.length} favorites from API`);
+                return;
+            }
+        } catch (e) {
+            console.warn('Could not load favorites from API, falling back to local:', e);
+        }
+    }
+
+    // Fallback to local storage + defaults
     try {
         const response = await fetch('default-favorites.json');
         const defaultFavorites = await response.json();
@@ -466,11 +557,11 @@ function initEventListeners() {
         }
     });
 
-    // Save favorite
-    document.getElementById('save-favorite').addEventListener('click', saveFavorite);
+    // Save favorite (keep for parcel selection)
+    document.getElementById('save-favorite')?.addEventListener('click', saveFavorite);
 
-    // Event delegation for favorites
-    document.getElementById('favorites-list').addEventListener('click', (e) => {
+    // Event delegation for legacy favorites (if element exists)
+    document.getElementById('favorites-list')?.addEventListener('click', (e) => {
         const item = e.target.closest('.favorite-item');
         if (!item) return;
 
@@ -481,10 +572,8 @@ function initEventListeners() {
         }
 
         const fav = favorites.find(f => f.id === item.dataset.id);
-        if (fav && fav.geometry) {
-            highlightFavorite(fav);
-            const bbox = getBbox(fav.geometry);
-            map.fitBounds(bbox, { padding: 100, maxZoom: 16, duration: 1000 });
+        if (fav) {
+            flyToFavorite(fav);
         }
     });
 }
@@ -547,7 +636,7 @@ function applyFilters() {
     showToast('Filters applied', 'success');
 }
 
-function saveFavorite() {
+async function saveFavorite() {
     if (selectedParcelId === null) {
         showToast('Select a parcel first', 'warning');
         return;
@@ -565,15 +654,24 @@ function saveFavorite() {
 
     const feature = features[0];
     const props = feature.properties;
+    const center = getCenter(feature.geometry);
+
     const favorite = {
         id: props.SPAN || props.ParcelID || Date.now().toString(),
         name: props.TNAME || props.TOWNNAME || props.Town || 'Unknown',
         address: props.E911ADDR || '',
-        acres: props.ACRESGL || props.ACRES || 'N/A',
+        acres: parseFloat(props.ACRESGL || props.ACRES) || 0,
+        center: center,
+        polygon: feature.geometry.coordinates,
+        price: props.REAL_FLV || props.TOTALVALUE || null,
+        listingStatus: 'off-market',
+        notes: '',
+        tags: [],
+        status: 'interested',
+        // Legacy fields for compatibility
         value: props.REAL_FLV || props.TOTALVALUE,
         span: props.SPAN,
         geometry: feature.geometry,
-        savedAt: new Date().toISOString()
     };
 
     if (favorites.find(f => f.id === favorite.id)) {
@@ -581,93 +679,167 @@ function saveFavorite() {
         return;
     }
 
-    favorites.push(favorite);
-    localStorage.setItem('plotViewer_favorites', JSON.stringify(favorites));
+    // Save to backend
+    const saved = await saveFavoriteToBackend(favorite);
+    favorites.push(saved);
     renderFavorites();
+    updateFavoriteMarkers();
     showToast('Parcel saved to favorites', 'success');
 }
 
+// Render favorites in sidebar (legacy - kept for parcel favorites)
 function renderFavorites() {
     const container = document.getElementById('favorites-list');
+    if (!container) return; // Favorites list removed from UI, using listings now
 
     if (favorites.length === 0) {
         container.innerHTML = '<p class="empty">No favorites yet</p>';
         return;
     }
 
-    container.innerHTML = favorites.map(f => `
-        <div class="favorite-item" data-id="${f.id}">
-            <div>
-                <div class="name">${f.name}</div>
-                <div class="acres">${f.acres} acres</div>
-                ${f.address ? `<div class="address">${f.address}</div>` : ''}
+    container.innerHTML = favorites.map(fav => `
+        <div class="favorite-item" data-id="${fav.id}">
+            <div class="favorite-info">
+                <div class="favorite-name">${fav.name || 'Unnamed'}</div>
+                <div class="favorite-details">${fav.acres ? fav.acres + ' acres' : ''}</div>
             </div>
-            <span class="remove">✕</span>
+            <button class="remove" title="Remove">×</button>
         </div>
     `).join('');
 }
 
-function highlightFavorite(fav) {
-    // Update the highlighted favorite source
-    const feature = {
-        type: 'Feature',
-        geometry: fav.geometry,
-        properties: {
-            id: fav.id,
-            name: fav.name,
-            acres: fav.acres,
-            address: fav.address
-        }
-    };
+// Render listings in sidebar
+function renderListings() {
+    const container = document.getElementById('listings-list');
 
-    map.getSource('highlighted-favorite').setData({
-        type: 'FeatureCollection',
-        features: [feature]
+    if (listings.length === 0) {
+        container.innerHTML = '<p class="empty">No listings found</p>';
+        return;
+    }
+
+    container.innerHTML = listings.map(l => {
+        const priceStr = l.price ? `$${l.price.toLocaleString()}` : 'Price N/A';
+        const bedsStr = l.beds ? `${l.beds}bd` : '';
+        const bathsStr = l.baths ? `${l.baths}ba` : '';
+        const acresStr = l.lot_acres ? `${l.lot_acres.toFixed(1)}ac` : '';
+        const details = [bedsStr, bathsStr, acresStr].filter(Boolean).join(' · ');
+
+        return `
+        <div class="listing-item" data-id="${l.id}">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                <div style="flex: 1;">
+                    <div class="price">${priceStr}</div>
+                    <div class="details">${details || '—'}</div>
+                    <div class="address">${l.address || 'Address N/A'}</div>
+                </div>
+                ${l.is_favorite ? '<span class="favorite-star">⭐</span>' : ''}
+            </div>
+        </div>
+    `}).join('');
+
+    // Add click handlers
+    container.querySelectorAll('.listing-item').forEach(el => {
+        el.addEventListener('click', () => {
+            // Remove active class from all items
+            container.querySelectorAll('.listing-item').forEach(item => item.classList.remove('active'));
+            // Add active class to clicked item
+            el.classList.add('active');
+
+            const id = el.dataset.id;
+            const listing = listings.find(l => l.id === id);
+            if (listing) {
+                flyToListing(listing);
+            }
+        });
+    });
+}
+
+// Update listing markers on map
+function updateListingMarkers() {
+    // Remove existing markers
+    listingMarkers.forEach(m => m.remove());
+    listingMarkers = [];
+
+    let skippedCount = 0;
+
+    // Add new markers
+    listings.forEach(l => {
+        // Validate coordinates are valid numbers
+        if (!isValidCoord(l.lat, l.lng)) {
+            skippedCount++;
+            return;
+        }
+
+        const el = document.createElement('div');
+        el.className = 'listing-marker';
+        el.style.cssText = `
+            width: 24px; height: 24px;
+            background: #10b981;
+            border: 2px solid white;
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        `;
+
+        const marker = new maplibregl.Marker({ element: el })
+            .setLngLat([l.lng, l.lat])
+            .addTo(map);
+
+        // Click to show popup
+        el.addEventListener('click', (e) => {
+            e.stopPropagation();
+            showListingPopup(l);
+        });
+
+        listingMarkers.push(marker);
     });
 
-    highlightedFavoriteId = fav.id;
+    if (skippedCount > 0) {
+        console.warn(`Skipped ${skippedCount} listings with invalid coordinates`);
+    }
+}
 
-    // Show popup at center
-    const center = getCenter(fav.geometry);
-
+// Show popup for a listing
+function showListingPopup(l) {
     // Remove existing popups
     document.querySelectorAll('.maplibregl-popup').forEach(p => p.remove());
 
-    new maplibregl.Popup({ closeOnClick: false })
-        .setLngLat(center)
+    const priceStr = l.price ? `$${l.price.toLocaleString()}` : 'Price N/A';
+
+    new maplibregl.Popup({ closeOnClick: true, maxWidth: '300px' })
+        .setLngLat([l.lng, l.lat])
         .setHTML(`
-            <div class="popup-title">${fav.name}</div>
-            <div class="popup-field">
-                <span class="popup-label">Acres:</span>
-                <span class="popup-value">${fav.acres}</span>
+            <div style="font-weight: 600; color: #10b981; font-size: 1.1em;">${priceStr}</div>
+            <div style="margin: 4px 0;">${l.address || 'Address N/A'}</div>
+            <div style="font-size: 0.9em; color: #666;">
+                ${l.beds ? `${l.beds} beds` : ''} ${l.baths ? `· ${l.baths} baths` : ''} ${l.sqft ? `· ${l.sqft.toLocaleString()} sqft` : ''}
             </div>
-            ${fav.address ? `
-            <div class="popup-field">
-                <span class="popup-label">Address:</span>
-                <span class="popup-value">${fav.address}</span>
-            </div>
-            ` : ''}
-            ${fav.note ? `
-            <div class="popup-field" style="flex-direction: column; gap: 4px;">
-                <span class="popup-label">Note:</span>
-                <span class="popup-value" style="text-align: left;">${fav.note}</span>
-            </div>
-            ` : ''}
+            ${l.lot_acres ? `<div style="font-size: 0.9em; color: #666;">${l.lot_acres.toFixed(2)} acres</div>` : ''}
+            ${l.source_url ? `<a href="${l.source_url}" target="_blank" style="font-size: 0.85em; color: #3b82f6; display: block; margin-top: 8px;">View on ${l.source || 'source'} →</a>` : ''}
         `)
         .addTo(map);
+
+    highlightedListingId = l.id;
 }
 
-function removeFavorite(id) {
-    favorites = favorites.filter(f => f.id !== id);
-    localStorage.setItem('plotViewer_favorites', JSON.stringify(favorites));
-    renderFavorites();
-    showToast('Removed from favorites', 'info');
+// Fly to listing location
+const FLY_DURATION = 1500;
 
-    // Clear highlight if removing the highlighted one
-    if (highlightedFavoriteId === id) {
-        map.getSource('highlighted-favorite').setData({ type: 'FeatureCollection', features: [] });
-        highlightedFavoriteId = null;
+function flyToListing(l) {
+    // Validate coordinates
+    if (!isValidCoord(l.lat, l.lng)) {
+        showToast('No location data for this listing', 'warning');
+        return;
     }
+
+    map.flyTo({
+        center: [l.lng, l.lat],
+        zoom: 14,
+        duration: FLY_DURATION
+    });
+
+    // Show popup after fly animation completes
+    setTimeout(() => showListingPopup(l), FLY_DURATION + 100);
 }
 
 function showLoading(show) {
@@ -707,4 +879,212 @@ function getCenter(geometry) {
         sumY += c[1];
     });
     return [sumX / coords.length, sumY / coords.length];
+}
+
+// Update favorite markers on the map
+function updateFavoriteMarkers() {
+    // Remove existing markers
+    favoriteMarkers.forEach(m => m.remove());
+    favoriteMarkers = [];
+
+    // Add markers for each favorite
+    favorites.forEach(fav => {
+        const center = fav.center || (fav.geometry ? getCenter(fav.geometry) : null);
+        if (!center || !isValidCoord(center[1], center[0])) return; // center is [lng, lat]
+
+        const status = fav.status || 'interested';
+        const color = STATUS_COLORS[status] || STATUS_COLORS.interested;
+
+        // Create marker element
+        const el = document.createElement('div');
+        el.className = 'favorite-marker';
+        el.style.cssText = `
+            width: 24px;
+            height: 24px;
+            background: ${color};
+            border: 2px solid white;
+            border-radius: 50%;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        `;
+        el.innerHTML = `<span style="font-size: 12px; color: white;">★</span>`;
+
+        const marker = new maplibregl.Marker({ element: el })
+            .setLngLat(center)
+            .addTo(map);
+
+        // Click handler - fly to and show popup
+        el.addEventListener('click', (e) => {
+            e.stopPropagation();
+            flyToFavorite(fav);
+        });
+
+        favoriteMarkers.push(marker);
+    });
+
+    console.log(`Added ${favoriteMarkers.length} favorite markers to map`);
+}
+
+// Fly to a favorite and show its popup
+function flyToFavorite(fav) {
+    const center = fav.center || (fav.geometry ? getCenter(fav.geometry) : null);
+    if (!center) return;
+
+    // Fly to location
+    map.flyTo({
+        center: center,
+        zoom: 15,
+        duration: 1000
+    });
+
+    // If has geometry, highlight it
+    if (fav.geometry) {
+        highlightFavorite(fav);
+    }
+
+    // Show popup
+    showFavoritePopup(fav, center);
+}
+
+// Highlight a favorite parcel on the map
+function highlightFavorite(fav) {
+    if (!fav.geometry) return;
+
+    // Add or update highlight source
+    if (map.getSource('favorite-highlight')) {
+        map.getSource('favorite-highlight').setData({
+            type: 'Feature',
+            geometry: fav.geometry,
+            properties: {}
+        });
+    } else {
+        map.addSource('favorite-highlight', {
+            type: 'geojson',
+            data: {
+                type: 'Feature',
+                geometry: fav.geometry,
+                properties: {}
+            }
+        });
+
+        map.addLayer({
+            id: 'favorite-highlight-layer',
+            type: 'line',
+            source: 'favorite-highlight',
+            paint: {
+                'line-color': '#fbbf24',
+                'line-width': 3
+            }
+        });
+    }
+}
+
+// Show detailed popup for a favorite
+function showFavoritePopup(fav, center) {
+    // Remove existing popups
+    document.querySelectorAll('.maplibregl-popup').forEach(p => p.remove());
+
+    const status = fav.status || 'interested';
+    const statusLabel = status.charAt(0).toUpperCase() + status.slice(1).replace('-', ' ');
+    const color = STATUS_COLORS[status] || STATUS_COLORS.interested;
+
+    let html = `
+        <div class="popup-title">${fav.name || 'Unnamed'}</div>
+        <div class="popup-field">
+            <span class="popup-label">Status:</span>
+            <span class="popup-value" style="color: ${color}; font-weight: 600;">${statusLabel}</span>
+        </div>
+    `;
+
+    if (fav.acres) {
+        html += `
+        <div class="popup-field">
+            <span class="popup-label">Acres:</span>
+            <span class="popup-value">${fav.acres}</span>
+        </div>`;
+    }
+
+    if (fav.address) {
+        html += `
+        <div class="popup-field">
+            <span class="popup-label">Address:</span>
+            <span class="popup-value">${fav.address}</span>
+        </div>`;
+    }
+
+    if (fav.price) {
+        html += `
+        <div class="popup-field">
+            <span class="popup-label">Price:</span>
+            <span class="popup-value">$${Number(fav.price).toLocaleString()}</span>
+        </div>`;
+    }
+
+    if (fav.listingUrl) {
+        html += `
+        <div class="popup-field">
+            <a href="${fav.listingUrl}" target="_blank" style="color: #3b82f6;">View Listing →</a>
+        </div>`;
+    }
+
+    if (fav.notes) {
+        html += `
+        <div class="popup-field" style="flex-direction: column; gap: 4px;">
+            <span class="popup-label">Notes:</span>
+            <span class="popup-value" style="text-align: left;">${fav.notes}</span>
+        </div>`;
+    }
+
+    if (fav.tags && fav.tags.length > 0) {
+        html += `
+        <div class="popup-field" style="flex-direction: column; gap: 4px;">
+            <span class="popup-label">Tags:</span>
+            <div style="display: flex; gap: 4px; flex-wrap: wrap;">
+                ${fav.tags.map(t => `<span style="background: #e5e7eb; padding: 2px 6px; border-radius: 4px; font-size: 11px;">${t}</span>`).join('')}
+            </div>
+        </div>`;
+    }
+
+    new maplibregl.Popup({ closeOnClick: false, maxWidth: '300px' })
+        .setLngLat(center)
+        .setHTML(html)
+        .addTo(map);
+}
+
+// Save favorite to API (if available) or localStorage
+async function saveFavoriteToBackend(favorite) {
+    if (CONFIG.favoritesApiUrl) {
+        try {
+            const response = await fetch(CONFIG.favoritesApiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(favorite)
+            });
+            if (response.ok) {
+                const saved = await response.json();
+                return saved;
+            }
+        } catch (e) {
+            console.warn('Failed to save to API, using localStorage:', e);
+        }
+    }
+    // Fallback to localStorage - save updated array including the new favorite
+    const updatedFavorites = [...favorites, favorite];
+    localStorage.setItem('plotViewer_favorites', JSON.stringify(updatedFavorites));
+    return favorite;
+}
+
+// Delete favorite from API (if available) or localStorage
+async function deleteFavoriteFromBackend(id) {
+    if (CONFIG.favoritesApiUrl) {
+        try {
+            await fetch(`${CONFIG.favoritesApiUrl}/${id}`, { method: 'DELETE' });
+        } catch (e) {
+            console.warn('Failed to delete from API:', e);
+        }
+    }
+    localStorage.setItem('plotViewer_favorites', JSON.stringify(favorites));
 }
