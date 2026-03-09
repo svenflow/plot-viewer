@@ -1,23 +1,44 @@
 /**
- * Plot Viewer Tile Proxy - Cloudflare Worker
+ * Plot Viewer API & Tile Proxy - Cloudflare Worker
  *
- * Proxies map tile and data requests with caching to avoid:
- * - CORS issues (all requests go through our domain)
- * - Rate limiting (Cloudflare edge caches tiles)
- * - Overloading public servers
+ * Features:
+ * 1. Tile proxying with caching (VCGI, terrain, satellite, OSM)
+ * 2. Favorites API backed by KV storage
  *
- * Supported endpoints:
+ * Endpoints:
  * - /vcgi/* - Vermont VCGI parcel data (ArcGIS Feature Service)
- * - /terrain/* - MapLibre demo terrain tiles
+ * - /terrain/* - AWS Terrarium terrain tiles (proxied for CORS)
  * - /satellite/* - ESRI World Imagery
  * - /osm/* - OpenStreetMap tiles
+ * - /favorites - GET all, POST new
+ * - /favorites/:id - GET, PUT, DELETE individual
  */
 
 interface Env {
   ALLOWED_ORIGINS: string;
+  FAVORITES: KVNamespace;
 }
 
-// Upstream base URLs
+// Favorite metadata schema
+interface Favorite {
+  id: string;
+  name: string;
+  acres: number;
+  address: string;
+  center: [number, number]; // [lng, lat]
+  polygon?: number[][][];   // GeoJSON polygon coordinates
+  price?: number;
+  listingStatus?: 'available' | 'pending' | 'sold' | 'off-market';
+  listingUrl?: string;
+  photos?: string[];
+  notes?: string;
+  tags?: string[];
+  status: 'interested' | 'visited' | 'offer-made' | 'purchased' | 'rejected';
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Upstream base URLs for tile proxying
 const UPSTREAMS: Record<string, string> = {
   vcgi: "https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services",
   terrain: "https://s3.amazonaws.com/elevation-tiles-prod/terrarium",
@@ -48,10 +69,15 @@ export default {
       return handleCors(
         request,
         env,
-        new Response(JSON.stringify({ status: "ok", upstreams: Object.keys(UPSTREAMS) }), {
+        new Response(JSON.stringify({ status: "ok", upstreams: Object.keys(UPSTREAMS), features: ["favorites"] }), {
           headers: { "Content-Type": "application/json" },
         })
       );
+    }
+
+    // Favorites API
+    if (path === "/favorites" || path.startsWith("/favorites/")) {
+      return handleFavorites(request, env, path);
     }
 
     // Parse provider from path: /vcgi/... -> vcgi
@@ -71,7 +97,7 @@ export default {
       return handleCors(
         request,
         env,
-        new Response(`Unknown provider: ${provider}. Valid: ${Object.keys(UPSTREAMS).join(", ")}`, {
+        new Response(`Unknown provider: ${provider}. Valid: ${Object.keys(UPSTREAMS).join(", ")}, favorites`, {
           status: 400,
         })
       );
@@ -137,6 +163,176 @@ export default {
   },
 };
 
+// Handle Favorites API
+async function handleFavorites(request: Request, env: Env, path: string): Promise<Response> {
+  const method = request.method;
+
+  // GET /favorites - list all
+  if (path === "/favorites" && method === "GET") {
+    const list = await env.FAVORITES.list();
+    const favorites: Favorite[] = [];
+    for (const key of list.keys) {
+      const data = await env.FAVORITES.get(key.name, "json");
+      if (data) favorites.push(data as Favorite);
+    }
+    return handleCors(
+      request,
+      env,
+      new Response(JSON.stringify(favorites), {
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+  }
+
+  // POST /favorites - create new
+  if (path === "/favorites" && method === "POST") {
+    try {
+      const body = await request.json() as Partial<Favorite>;
+      const id = body.id || crypto.randomUUID();
+      const now = new Date().toISOString();
+      const favorite: Favorite = {
+        id,
+        name: body.name || "Unnamed",
+        acres: body.acres || 0,
+        address: body.address || "",
+        center: body.center || [0, 0],
+        polygon: body.polygon,
+        price: body.price,
+        listingStatus: body.listingStatus,
+        listingUrl: body.listingUrl,
+        photos: body.photos || [],
+        notes: body.notes || "",
+        tags: body.tags || [],
+        status: body.status || "interested",
+        createdAt: now,
+        updatedAt: now,
+      };
+      await env.FAVORITES.put(id, JSON.stringify(favorite));
+      return handleCors(
+        request,
+        env,
+        new Response(JSON.stringify(favorite), {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+    } catch (e) {
+      return handleCors(
+        request,
+        env,
+        new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+    }
+  }
+
+  // Extract ID from /favorites/:id
+  const idMatch = path.match(/^\/favorites\/([^\/]+)$/);
+  if (!idMatch) {
+    return handleCors(
+      request,
+      env,
+      new Response("Invalid favorites path", { status: 400 })
+    );
+  }
+  const id = idMatch[1];
+
+  // GET /favorites/:id
+  if (method === "GET") {
+    const data = await env.FAVORITES.get(id, "json");
+    if (!data) {
+      return handleCors(
+        request,
+        env,
+        new Response(JSON.stringify({ error: "Not found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+    }
+    return handleCors(
+      request,
+      env,
+      new Response(JSON.stringify(data), {
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+  }
+
+  // PUT /favorites/:id - update
+  if (method === "PUT") {
+    const existing = await env.FAVORITES.get(id, "json") as Favorite | null;
+    if (!existing) {
+      return handleCors(
+        request,
+        env,
+        new Response(JSON.stringify({ error: "Not found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+    }
+    try {
+      const body = await request.json() as Partial<Favorite>;
+      const updated: Favorite = {
+        ...existing,
+        ...body,
+        id, // Don't allow changing ID
+        createdAt: existing.createdAt, // Preserve original
+        updatedAt: new Date().toISOString(),
+      };
+      await env.FAVORITES.put(id, JSON.stringify(updated));
+      return handleCors(
+        request,
+        env,
+        new Response(JSON.stringify(updated), {
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+    } catch (e) {
+      return handleCors(
+        request,
+        env,
+        new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+    }
+  }
+
+  // DELETE /favorites/:id
+  if (method === "DELETE") {
+    const existing = await env.FAVORITES.get(id);
+    if (!existing) {
+      return handleCors(
+        request,
+        env,
+        new Response(JSON.stringify({ error: "Not found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+    }
+    await env.FAVORITES.delete(id);
+    return handleCors(
+      request,
+      env,
+      new Response(JSON.stringify({ deleted: true }), {
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+  }
+
+  return handleCors(
+    request,
+    env,
+    new Response("Method not allowed", { status: 405 })
+  );
+}
+
 function handleCors(request: Request, env: Env, response: Response): Response {
   const origin = request.headers.get("Origin") || "";
   const allowedOrigins = env.ALLOWED_ORIGINS?.split(",") || [];
@@ -152,7 +348,7 @@ function handleCors(request: Request, env: Env, response: Response): Response {
     headers.set("Access-Control-Allow-Origin", "*");
   }
 
-  headers.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  headers.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   headers.set("Access-Control-Allow-Headers", "Content-Type");
   headers.set("Access-Control-Max-Age", "86400");
 

@@ -4,3 +4,7 @@ compatibility_date = "2024-01-01"
 
 [vars]
 ALLOWED_ORIGINS = "https://svenflow.github.io,http://localhost"
+
+[[kv_namespaces]]
+binding = "FAVORITES"
+id = "3a97dc6d06f34f0b8eb19d4353c35ee8"

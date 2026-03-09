@@ -725,9 +725,15 @@ function renderListings() {
         const acresStr = l.lot_acres ? `${l.lot_acres.toFixed(1)}ac` : '';
         const details = [bedsStr, bathsStr, sqftStr, acresStr].filter(Boolean).join(' · ');
 
-        // Days on market
-        const daysOnMarket = getDaysOnMarket(l.first_seen);
+        // Days on market (prefer stored value over calculated)
+        const daysOnMarket = l.days_on_market ?? getDaysOnMarket(l.first_seen);
         const daysStr = daysOnMarket !== null ? (daysOnMarket === 0 ? 'New' : `${daysOnMarket}d`) : '';
+
+        // Utility info (water/septic/heating)
+        const utilityParts = [];
+        if (l.water_source) utilityParts.push(`💧${l.water_source}`);
+        if (l.sewer) utilityParts.push(`🚽${l.sewer}`);
+        const utilityStr = utilityParts.length > 0 ? utilityParts.join(' ') : '';
 
         // Image thumbnail
         const imageUrl = l.primary_image_url || (l.image_urls && l.image_urls[0]);
@@ -744,6 +750,7 @@ function renderListings() {
                         ${daysStr ? `<span style="font-size: 0.75em; color: #888;">📅 ${daysStr}</span>` : ''}
                     </div>
                     <div class="details">${details || '—'}</div>
+                    ${utilityStr ? `<div style="font-size: 0.75em; color: #888;">${utilityStr}</div>` : ''}
                     <div class="address">${l.address || 'Address N/A'}</div>
                 </div>
                 ${l.is_favorite ? '<span class="favorite-star">⭐</span>' : ''}
@@ -823,13 +830,24 @@ function getDaysOnMarket(firstSeen) {
     return diffDays;
 }
 
+// Simple markdown to HTML converter for preview_md/details_md
+function renderMarkdown(md) {
+    if (!md) return '';
+    return md
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        .replace(/^- (.+)$/gm, '<li>$1</li>')
+        .replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
+        .replace(/\n/g, '<br>');
+}
+
 // Show popup for a listing
 function showListingPopup(l) {
     // Remove existing popups
     document.querySelectorAll('.maplibregl-popup').forEach(p => p.remove());
 
     const priceStr = l.price ? `$${l.price.toLocaleString()}` : 'Price N/A';
-    const daysOnMarket = getDaysOnMarket(l.first_seen);
+    const daysOnMarket = l.days_on_market ?? getDaysOnMarket(l.first_seen);
     const daysStr = daysOnMarket !== null ? (daysOnMarket === 0 ? 'New today' : `${daysOnMarket} day${daysOnMarket === 1 ? '' : 's'} on market`) : '';
 
     // Build image HTML if available
@@ -843,17 +861,37 @@ function showListingPopup(l) {
     // Google Maps link
     const googleMapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(l.address || `${l.lat},${l.lng}`)}`;
 
-    new maplibregl.Popup({ closeOnClick: true, maxWidth: '300px' })
-        .setLngLat([l.lng, l.lat])
-        .setHTML(`
-            ${imageHtml}
+    // Use preview_md if available, otherwise build from fields
+    let contentHtml;
+    if (l.preview_md) {
+        contentHtml = `
+            <div class="listing-preview-md">${renderMarkdown(l.preview_md)}</div>
+        `;
+    } else {
+        // Build utility info line
+        const utilityParts = [];
+        if (l.water_source) utilityParts.push(`💧 ${l.water_source}`);
+        if (l.sewer) utilityParts.push(`🚽 ${l.sewer}`);
+        if (l.heating) utilityParts.push(`🔥 ${l.heating}`);
+        const utilityStr = utilityParts.join(' · ');
+
+        contentHtml = `
             <div style="font-weight: 600; color: #10b981; font-size: 1.1em;">${priceStr}</div>
             <div style="margin: 4px 0;">${l.address || 'Address N/A'}</div>
             <div style="font-size: 0.9em; color: #666;">
                 ${l.beds ? `${l.beds} beds` : ''} ${l.baths ? `· ${l.baths} baths` : ''} ${l.sqft ? `· ${l.sqft.toLocaleString()} sqft` : ''}
             </div>
             ${l.lot_acres ? `<div style="font-size: 0.9em; color: #666;">${l.lot_acres.toFixed(2)} acres</div>` : ''}
+            ${utilityStr ? `<div style="font-size: 0.85em; color: #888; margin-top: 4px;">${utilityStr}</div>` : ''}
             ${daysStr ? `<div style="font-size: 0.85em; color: #888; margin-top: 4px;">📅 ${daysStr}</div>` : ''}
+        `;
+    }
+
+    new maplibregl.Popup({ closeOnClick: true, maxWidth: '300px' })
+        .setLngLat([l.lng, l.lat])
+        .setHTML(`
+            ${imageHtml}
+            ${contentHtml}
             <div style="display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap;">
                 ${l.source_url ? `<a href="${l.source_url}" target="_blank" style="font-size: 0.85em; color: #3b82f6;">View on ${l.source || 'source'} →</a>` : ''}
                 <a href="${googleMapsUrl}" target="_blank" style="font-size: 0.85em; color: #3b82f6;">📍 Google Maps</a>
