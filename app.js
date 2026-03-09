@@ -261,8 +261,7 @@ async function loadParcelsInView() {
         return;
     }
 
-    showLoading(true);
-
+    // Load parcels in background - no modal interruption
     try {
         const bounds = map.getBounds();
         const bbox = `${bounds.getWest()},${bounds.getSouth()},${bounds.getEast()},${bounds.getNorth()}`;
@@ -293,8 +292,6 @@ async function loadParcelsInView() {
         }
     } catch (error) {
         console.error('Error loading parcels:', error);
-    } finally {
-        showLoading(false);
     }
 }
 
@@ -380,8 +377,8 @@ function initEventListeners() {
 
     document.getElementById('layer-terrain').addEventListener('change', (e) => {
         if (e.target.checked) {
-            // Enable 3D terrain
-            map.setTerrain({ source: 'terrain-dem', exaggeration: 1.5 });
+            // Enable 3D terrain with higher exaggeration for visible hills
+            map.setTerrain({ source: 'terrain-dem', exaggeration: 2.5 });
             map.setLayoutProperty('hillshade-layer', 'visibility', 'visible');
             // Tilt the map for 3D effect
             map.easeTo({ pitch: 60, duration: 500 });
