@@ -1,0 +1,314 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "httpx",
+#     "rich",
+#     "scrapling[all]>=0.4",
+# ]
+# ///
+"""
+Redfin property search CLI using scrapling.
+
+Scrapes Redfin search pages directly using StealthyFetcher (Camoufox).
+
+Usage:
+    redfin search "Vermont" --beds 3 --min-acres 10
+    redfin search VT --max-price 1000000 --json
+    redfin streetview "206 Conway Road, Starksboro VT" --save /tmp/sv.jpg
+    redfin aerial "206 Conway Road, Starksboro VT" --save /tmp/aerial.jpg
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import urllib.parse
+from typing import Optional
+
+import httpx
+from rich.console import Console
+from rich.table import Table
+
+console = Console()
+
+
+def get_google_api_key() -> str:
+    """Get Google API key from keychain."""
+    result = subprocess.run(
+        ['security', 'find-generic-password', '-s', 'google-api-key', '-w'],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Could not get google-api-key from keychain")
+    return result.stdout.strip()
+
+
+def build_search_url(region: str, **filters) -> str:
+    """Build Redfin search URL with filters."""
+    state_map = {
+        'vermont': 'Vermont', 'vt': 'Vermont',
+        'new hampshire': 'New-Hampshire', 'nh': 'New-Hampshire',
+        'maine': 'Maine', 'me': 'Maine',
+    }
+
+    region_lower = region.lower().replace(' ', '-')
+    state_name = state_map.get(region_lower, region)
+
+    filter_parts = [
+        "property-type=house",
+        "status=active",
+    ]
+
+    if filters.get('min_beds'):
+        filter_parts.append(f"min-beds={filters['min_beds']}")
+    if filters.get('min_baths'):
+        filter_parts.append(f"min-baths={filters['min_baths']}")
+    if filters.get('max_price'):
+        filter_parts.append(f"max-price={filters['max_price']}")
+    if filters.get('min_acres'):
+        filter_parts.append(f"min-lot-size={int(filters['min_acres'])}-acre")
+
+    filter_str = ",".join(filter_parts)
+    return f"https://www.redfin.com/state/{state_name}/filter/{filter_str}"
+
+
+def parse_redfin_html(html: str) -> list[dict]:
+    """Parse Redfin HTML to extract property listings."""
+    results = []
+
+    # Find all HomeCard blocks with their content
+    # Pattern: HomeCardContainer div containing price, address, stats, and link
+    card_pattern = r'<div[^>]*class="[^"]*HomeCardContainer[^"]*"[^>]*>(.*?)</article>'
+    cards = re.findall(card_pattern, html, re.DOTALL)
+
+    if not cards:
+        # Alternative: find by individual elements and correlate
+        # Extract prices
+        prices = re.findall(r'\$([0-9,]+)', html)
+        # Extract property URLs with addresses
+        links = re.findall(r'href="(/VT/([^/]+)/([^/]+)/home/(\d+))"', html)
+        # Extract beds/baths
+        beds = re.findall(r'(\d+)\s*beds?', html, re.I)
+        baths = re.findall(r'([\d.]+)\s*baths?', html, re.I)
+        sqft = re.findall(r'([\d,]+)\s*sq\s*ft', html, re.I)
+
+        # Correlate by order (they appear in same order on page)
+        for i, link in enumerate(links[:30]):
+            url_path, city, address_slug, home_id = link
+            # Parse address from slug: "80-Norford-Lake-Rd-05055" -> "80 Norford Lake Rd"
+            parts = address_slug.rsplit('-', 1)
+            if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 5:
+                address_part = parts[0].replace('-', ' ')
+            else:
+                address_part = address_slug.replace('-', ' ')
+
+            city_name = city.replace('-', ' ')
+            address = f"{address_part}, {city_name}, VT"
+
+            result = {
+                'address': address,
+                'url': f"https://www.redfin.com{url_path}",
+                'home_id': home_id,
+                'city': city_name,
+            }
+
+            # Add price if available (prices appear before links in DOM)
+            if i < len(prices):
+                try:
+                    result['price'] = int(prices[i].replace(',', ''))
+                except:
+                    pass
+
+            # Add beds/baths if available
+            if i < len(beds):
+                try:
+                    result['beds'] = int(beds[i])
+                except:
+                    pass
+            if i < len(baths):
+                try:
+                    result['baths'] = float(baths[i])
+                except:
+                    pass
+            if i < len(sqft):
+                try:
+                    result['sqft'] = int(sqft[i].replace(',', ''))
+                except:
+                    pass
+
+            results.append(result)
+
+    return results
+
+
+def search_redfin(region: str, filters: dict) -> dict:
+    """Search Redfin by scraping the search results page."""
+    try:
+        from scrapling import StealthyFetcher
+
+        url = build_search_url(region, **filters)
+
+        page = StealthyFetcher.fetch(url, headless=True, network_idle=True)
+        html = page.html_content
+
+        results = parse_redfin_html(html)
+
+        return {
+            'totalResults': len(results),
+            'results': results,
+            'url': url,
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_streetview_url(address: str, api_key: str, size: str = "600x400") -> str:
+    """Get Street View static image URL."""
+    params = {
+        'size': size,
+        'location': address,
+        'key': api_key,
+    }
+    base_url = "https://maps.googleapis.com/maps/api/streetview"
+    return f"{base_url}?{urllib.parse.urlencode(params)}"
+
+
+def get_aerial_url(address: str, api_key: str, zoom: int = 18, size: str = "600x400") -> str:
+    """Get aerial/satellite view URL."""
+    params = {
+        'center': address,
+        'zoom': zoom,
+        'size': size,
+        'maptype': 'satellite',
+        'key': api_key,
+    }
+    base_url = "https://maps.googleapis.com/maps/api/staticmap"
+    return f"{base_url}?{urllib.parse.urlencode(params)}"
+
+
+def download_image(url: str, save_path: str) -> bool:
+    """Download image from URL."""
+    response = httpx.get(url, timeout=30)
+    if response.status_code == 200:
+        with open(save_path, 'wb') as f:
+            f.write(response.content)
+        return True
+    return False
+
+
+def format_search_results(data: dict) -> None:
+    """Pretty print search results."""
+    if 'error' in data:
+        console.print(f"[red]Error: {data['error']}[/red]")
+        return
+
+    total = data.get('totalResults', 0)
+    results = data.get('results', [])
+
+    console.print(f"\n[bold green]Found {total} properties[/bold green]")
+
+    if not results:
+        return
+
+    table = Table()
+    table.add_column("Address", style="cyan", max_width=35)
+    table.add_column("Price", justify="right")
+    table.add_column("Bed/Bath")
+    table.add_column("Sqft", justify="right")
+    table.add_column("URL", style="blue", max_width=40)
+
+    for r in results[:20]:
+        price = f"${r['price']:,}" if r.get('price') else 'N/A'
+        bb = f"{r.get('beds', '?')}/{r.get('baths', '?')}"
+        sqft = f"{r['sqft']:,}" if r.get('sqft') else 'N/A'
+
+        table.add_row(
+            r.get('address', 'N/A')[:35],
+            price,
+            bb,
+            sqft,
+            r.get('url', '')[-40:],
+        )
+
+    console.print(table)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Redfin property search CLI (scrapling)")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    # Search command
+    search_parser = subparsers.add_parser("search", help="Search for properties")
+    search_parser.add_argument("region", help="State to search (e.g., 'Vermont', 'VT')")
+    search_parser.add_argument("--beds", type=int, help="Minimum bedrooms")
+    search_parser.add_argument("--baths", type=int, help="Minimum bathrooms")
+    search_parser.add_argument("--max-price", type=int, help="Maximum price")
+    search_parser.add_argument("--min-acres", type=float, help="Minimum lot size in acres")
+    search_parser.add_argument("--json", action="store_true", help="Output raw JSON")
+
+    # Street View command
+    sv_parser = subparsers.add_parser("streetview", help="Get Street View image")
+    sv_parser.add_argument("address", help="Property address")
+    sv_parser.add_argument("--save", help="Save image to path")
+    sv_parser.add_argument("--size", default="600x400", help="Image size")
+
+    # Aerial command
+    aerial_parser = subparsers.add_parser("aerial", help="Get aerial/satellite image")
+    aerial_parser.add_argument("address", help="Property address")
+    aerial_parser.add_argument("--save", help="Save image to path")
+    aerial_parser.add_argument("--size", default="600x400", help="Image size")
+    aerial_parser.add_argument("--zoom", type=int, default=18, help="Zoom level")
+
+    args = parser.parse_args()
+
+    if args.command == "search":
+        filters = {}
+        if args.beds:
+            filters['min_beds'] = args.beds
+        if args.baths:
+            filters['min_baths'] = args.baths
+        if args.max_price:
+            filters['max_price'] = args.max_price
+        if args.min_acres:
+            filters['min_acres'] = args.min_acres
+
+        data = search_redfin(args.region, filters)
+
+        if args.json:
+            print(json.dumps(data, indent=2))
+        else:
+            format_search_results(data)
+
+    elif args.command == "streetview":
+        api_key = get_google_api_key()
+        url = get_streetview_url(args.address, api_key, args.size)
+
+        if args.save:
+            if download_image(url, args.save):
+                console.print(f"[green]Saved to {args.save}[/green]")
+            else:
+                console.print("[red]Failed to download image[/red]")
+        else:
+            console.print(url)
+
+    elif args.command == "aerial":
+        api_key = get_google_api_key()
+        url = get_aerial_url(args.address, api_key, args.zoom, args.size)
+
+        if args.save:
+            if download_image(url, args.save):
+                console.print(f"[green]Saved to {args.save}[/green]")
+            else:
+                console.print("[red]Failed to download image[/red]")
+        else:
+            console.print(url)
+
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

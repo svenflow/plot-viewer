@@ -1,5 +1,12 @@
 # Plot Viewer - Developer Notes
 
+## Package Manager
+
+**ALWAYS use `bun`** for all JS/TS operations in this project:
+- `bun install` - Install dependencies
+- `bun run dev` - Run dev server
+- `bunx wrangler deploy` - Deploy workers
+
 ## Architecture
 
 ### Cloudflare Worker Proxy
@@ -22,7 +29,7 @@ All external API requests are proxied through a Cloudflare Worker for:
 **Deployment:**
 ```bash
 cd workers/tile-proxy
-npm run deploy
+bun run deploy
 ```
 
 ### Map Layers
@@ -35,10 +42,63 @@ npm run deploy
 
 ### Favorites System
 
-Favorites are stored in localStorage with full polygon geometry. When clicked:
+Favorites are stored in Cloudflare KV (via API) with full polygon geometry. When clicked:
 1. Parcel is highlighted immediately (no API call needed)
 2. Map fits bounds to parcel
 3. Popup shows details
+
+**API Endpoints:**
+- `GET /favorites` - List all favorites
+- `POST /favorites` - Create new favorite
+- `GET /favorites/:id` - Get single favorite
+- `PUT /favorites/:id` - Update favorite
+- `DELETE /favorites/:id` - Delete favorite
+
+**Note:** KV list() has eventual consistency - newly added favorites may not appear in list for ~60 seconds, but GET by ID works immediately.
+
+## CLI
+
+The `plot` CLI manages favorites from the command line:
+
+```bash
+# Location
+~/code/plot-viewer/scripts/plot
+
+# Commands
+plot list                           # List all favorites
+plot list --status interested       # Filter by status
+plot get <id>                       # Get single favorite details
+plot add --name X --acres Y         # Add manually
+plot import <span>                  # Import from VCGI by SPAN
+plot update <id> --status visited   # Update status/fields
+plot delete <id>                    # Remove favorite
+plot search --town STOCKBRIDGE      # Search VCGI parcels
+plot search --min-acres 50          # Filter by acreage
+
+# Options
+--json                              # JSON output for scripting
+--version                           # Show version
+```
+
+**Favorite Schema:**
+```typescript
+{
+  id: string;           // SPAN or UUID
+  name: string;         // Town name
+  acres: number;
+  address: string;
+  center: [lng, lat];
+  polygon?: coords;     // Full GeoJSON polygon
+  price?: number;
+  listingStatus?: 'available' | 'pending' | 'sold' | 'off-market';
+  listingUrl?: string;
+  notes?: string;
+  tags?: string[];
+  status: 'interested' | 'visited' | 'offer-made' | 'purchased' | 'rejected';
+  createdAt: string;
+  updatedAt: string;
+}
+```
 
 ## Vermont Parcel Data Sources
 
@@ -136,3 +196,67 @@ In these cases, query the **parent parcel** (often has same street name but diff
 - **Geometry queries with bbox:** The ArcGIS envelope query may not filter by location as expected. Use attribute queries (TNAME, SPAN) when possible.
 
 - **New listings not in state data:** Properties being subdivided from municipal land often appear on listing sites (Redfin, LandWatch) before they're added to VCGI.
+
+## Listings API (Cloudflare D1)
+
+**Worker:** `plot-listings-api.nicklaudethorat.workers.dev`
+
+**Database:** D1 `plot-listings` (SQLite at edge)
+
+**Schema:**
+- `listings` - Current listing state
+- `price_history` - Normalized price tracking (indexed)
+- `status_history` - Status changes over time
+
+**API Endpoints:**
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/listings?state=VT&min_beds=3` | Search with filters |
+| POST | `/listings` | Upsert single listing |
+| POST | `/listings/bulk` | Bulk upsert (for scrapers) |
+| GET | `/listings/:id` | Get single listing |
+| GET | `/listings/:id/price-history` | Price history |
+| POST | `/listings/:id/favorite` | Toggle favorite |
+| GET | `/feed` | New listings + price drops |
+| GET | `/stats` | Aggregate stats |
+
+**Sync Command:**
+```bash
+# Run scrapers and push to D1
+./scripts/sync-to-cloudflare
+
+# Preview without pushing
+./scripts/sync-to-cloudflare --dry-run
+
+# Single source
+./scripts/sync-to-cloudflare --source zillow
+```
+
+**Deployment:**
+```bash
+cd workers/listings-api
+bun install
+bunx wrangler d1 migrations apply plot-listings --remote
+bunx wrangler deploy
+```
+
+## Property Scrapers
+
+All scrapers use **scrapling** (headless scraping library) and output JSON.
+
+| Script | Source | Status |
+|--------|--------|--------|
+| `zillow` | Zillow | ✅ Works (Tier 1 fetcher) |
+| `redfin` | Redfin | ✅ Works (scrapes HTML) |
+| `realtor` | Realtor.com | ❌ Blocked (429) |
+| `cblife` | Coldwell Banker | ✅ Updated |
+| `hickok` | Hickok & Boardman | ✅ Updated |
+| `lakehomes` | LakeHomes.com | ✅ Updated |
+| `mahoosuc` | Mahoosuc Realty | ✅ Updated |
+| `vtrec` | VT Real Estate Co | ✅ Updated |
+
+**Usage:**
+```bash
+./scripts/zillow search VT --max-price 1000000 --json
+./scripts/redfin search VT --beds 3 --json
+```

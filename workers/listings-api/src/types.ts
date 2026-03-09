@@ -45,6 +45,17 @@ export interface Listing {
   heating?: string;  // 'oil', 'propane', 'electric', 'wood'
   days_on_market?: number;
 
+  // VCGI parcel data (Vermont only)
+  vcgi_span?: string;  // Vermont parcel ID
+  vcgi_owner?: string;  // Owner name
+  vcgi_acres?: number;  // Official acreage
+  vcgi_land_value?: number;  // Land assessed value
+  vcgi_improvement_value?: number;  // Improvement assessed value
+  vcgi_total_value?: number;  // Total assessed value
+  vcgi_town?: string;  // Town name
+  vcgi_property_type?: string;  // Property type code
+  vcgi_geometry?: string;  // GeoJSON polygon
+
   // User data
   is_favorite: boolean;
   notes?: string;

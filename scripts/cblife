@@ -1,0 +1,179 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["httpx", "rich", "scrapling[all]>=0.4"]
+# ///
+"""
+Coldwell Banker Lifestyles (thecblife.com) CLI - VT/NH/ME ski properties
+
+Scrapes ski home listings using scrapling.
+
+Usage:
+    cblife search                      # All ski homes
+    cblife search --state VT           # Vermont only
+    cblife search --beds 3 --json      # 3+ bedrooms, JSON output
+"""
+
+import argparse
+import json
+import re
+import sys
+
+from rich.console import Console
+from rich.table import Table
+
+console = Console()
+
+# Ski home URLs by state
+SKI_URLS = {
+    "all": "https://www.thecblife.com/ski-homes/",
+    "vt": "https://www.thecblife.com/vermont-ski-homes-for-sale/",
+    "nh": "https://www.thecblife.com/new-hampshire-ski-homes/",
+}
+
+
+def parse_listings(html: str) -> list[dict]:
+    """Parse listings from CBLife HTML."""
+    listings = []
+
+    # CBLife uses a JavaScript array for property data
+    # Look for property cards or embedded data
+
+    # Pattern for property cards with data attributes
+    card_pattern = r'<div[^>]*class="[^"]*property-card[^"]*"[^>]*>(.*?)</div>\s*</div>'
+
+    # Alternative: find price/address/beds/baths patterns
+    prices = re.findall(r'\$([0-9,]+)', html)
+    addresses = re.findall(r'<[^>]*class="[^"]*address[^"]*"[^>]*>([^<]+)<', html, re.I)
+
+    # Find listing URLs
+    urls = re.findall(r'href="(https://www\.thecblife\.com/[^"]*-\d+/)"', html)
+
+    # Parse beds/baths
+    beds = re.findall(r'(\d+)\s*(?:bed|br)', html, re.I)
+    baths = re.findall(r'([\d.]+)\s*(?:bath|ba)', html, re.I)
+
+    # Try to correlate
+    for i, url in enumerate(urls[:30]):
+        result = {
+            'url': url,
+        }
+        if i < len(prices):
+            try:
+                result['price'] = int(prices[i].replace(',', ''))
+            except:
+                pass
+        if i < len(addresses):
+            result['address'] = addresses[i].strip()
+        if i < len(beds):
+            try:
+                result['beds'] = int(beds[i])
+            except:
+                pass
+        if i < len(baths):
+            try:
+                result['baths'] = float(baths[i])
+            except:
+                pass
+        listings.append(result)
+
+    return listings
+
+
+def search_cblife(state: str = "all", min_beds: int = None, min_baths: int = None,
+                  max_price: int = None, min_acres: float = None) -> dict:
+    """Search CBLife ski homes."""
+    try:
+        from scrapling import Fetcher
+
+        url = SKI_URLS.get(state.lower(), SKI_URLS["all"])
+
+        page = Fetcher().get(url)
+        html = page.html_content
+
+        listings = parse_listings(html)
+
+        # Apply filters
+        if min_beds:
+            listings = [l for l in listings if l.get('beds', 0) >= min_beds]
+        if min_baths:
+            listings = [l for l in listings if l.get('baths', 0) >= min_baths]
+        if max_price:
+            listings = [l for l in listings if l.get('price', float('inf')) <= max_price]
+
+        return {
+            'totalResults': len(listings),
+            'results': listings,
+            'url': url,
+            'source': 'cblife',
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def format_results(data: dict) -> None:
+    """Pretty print results."""
+    if 'error' in data:
+        console.print(f"[red]Error: {data['error']}[/red]")
+        return
+
+    results = data.get('results', [])
+    console.print(f"\n[bold green]Found {len(results)} properties[/bold green]")
+
+    if not results:
+        return
+
+    table = Table()
+    table.add_column("Address", style="cyan", max_width=30)
+    table.add_column("Price", justify="right")
+    table.add_column("Bed/Bath")
+    table.add_column("URL", style="blue", max_width=40)
+
+    for r in results[:20]:
+        price = f"${r['price']:,}" if r.get('price') else 'N/A'
+        bb = f"{r.get('beds', '?')}/{r.get('baths', '?')}"
+
+        table.add_row(
+            r.get('address', 'N/A')[:30],
+            price,
+            bb,
+            r.get('url', '')[-40:],
+        )
+
+    console.print(table)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="CBLife ski property search (scrapling)")
+    subparsers = parser.add_subparsers(dest="command")
+
+    search_parser = subparsers.add_parser("search", help="Search ski homes")
+    search_parser.add_argument("--state", default="all", help="State (VT, NH, or all)")
+    search_parser.add_argument("--min-beds", type=int, help="Minimum bedrooms")
+    search_parser.add_argument("--min-baths", type=int, help="Minimum bathrooms")
+    search_parser.add_argument("--max-price", type=int, help="Maximum price")
+    search_parser.add_argument("--min-acres", type=float, help="Minimum acres")
+    search_parser.add_argument("--json", action="store_true", help="JSON output")
+
+    args = parser.parse_args()
+
+    if args.command == "search":
+        data = search_cblife(
+            state=args.state,
+            min_beds=args.min_beds,
+            min_baths=args.min_baths,
+            max_price=args.max_price,
+            min_acres=args.min_acres,
+        )
+
+        if args.json:
+            print(json.dumps(data, indent=2))
+        else:
+            format_results(data)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

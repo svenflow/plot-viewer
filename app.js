@@ -725,7 +725,9 @@ function renderListings() {
         const bedsStr = l.beds ? `${l.beds}bd` : '';
         const bathsStr = l.baths ? `${l.baths}ba` : '';
         const sqftStr = l.sqft ? `${l.sqft.toLocaleString()}sf` : '';
-        const acresStr = l.lot_acres ? `${l.lot_acres.toFixed(1)}ac` : '';
+        // Prefer VCGI acres (official) over listing acres
+        const acres = l.vcgi_acres || l.lot_acres;
+        const acresStr = acres ? `${parseFloat(acres).toFixed(1)}ac${l.vcgi_acres ? '*' : ''}` : '';
         const details = [bedsStr, bathsStr, sqftStr, acresStr].filter(Boolean).join(' · ');
 
         // Days on market (prefer stored value over calculated)
@@ -878,13 +880,25 @@ function showListingPopup(l) {
         if (l.heating) utilityParts.push(`🔥 ${l.heating}`);
         const utilityStr = utilityParts.join(' · ');
 
+        // Prefer VCGI acres (official) over listing acres
+        const acres = l.vcgi_acres || l.lot_acres;
+        const acresLabel = l.vcgi_acres ? 'acres (VCGI)' : 'acres';
+
+        // VCGI parcel info
+        const vcgiParts = [];
+        if (l.vcgi_owner) vcgiParts.push(`Owner: ${l.vcgi_owner}`);
+        if (l.vcgi_land_value) vcgiParts.push(`Land: $${l.vcgi_land_value.toLocaleString()}`);
+        if (l.vcgi_total_value) vcgiParts.push(`Assessed: $${l.vcgi_total_value.toLocaleString()}`);
+        const vcgiStr = vcgiParts.length > 0 ? vcgiParts.join(' · ') : '';
+
         contentHtml = `
             <div style="font-weight: 600; color: #10b981; font-size: 1.1em;">${priceStr}</div>
             <div style="margin: 4px 0;">${l.address || 'Address N/A'}</div>
             <div style="font-size: 0.9em; color: #666;">
                 ${l.beds ? `${l.beds} beds` : ''} ${l.baths ? `· ${l.baths} baths` : ''} ${l.sqft ? `· ${l.sqft.toLocaleString()} sqft` : ''}
             </div>
-            ${l.lot_acres ? `<div style="font-size: 0.9em; color: #666;">${l.lot_acres.toFixed(2)} acres</div>` : ''}
+            ${acres ? `<div style="font-size: 0.9em; color: #666;">${parseFloat(acres).toFixed(2)} ${acresLabel}</div>` : ''}
+            ${vcgiStr ? `<div style="font-size: 0.85em; color: #888; margin-top: 4px;">📋 ${vcgiStr}</div>` : ''}
             ${utilityStr ? `<div style="font-size: 0.85em; color: #888; margin-top: 4px;">${utilityStr}</div>` : ''}
             ${daysStr ? `<div style="font-size: 0.85em; color: #888; margin-top: 4px;">📅 ${daysStr}</div>` : ''}
         `;
@@ -924,8 +938,8 @@ function flyToListing(l) {
     // After fly, load parcels and find the one at this point
     setTimeout(async () => {
         showListingPopup(l);
-        // Query for parcel at this point and highlight it
-        await highlightParcelAtPoint(l.lng, l.lat);
+        // Query for parcel at this point, highlight it, and save VCGI data
+        await highlightParcelAtPoint(l.lng, l.lat, l.id);
     }, FLY_DURATION + 100);
 }
 
@@ -940,7 +954,8 @@ function clearListingParcelHighlight() {
 }
 
 // Query VCGI for parcel containing a point and highlight it
-async function highlightParcelAtPoint(lng, lat) {
+// If listingId is provided, save VCGI data to the listings API
+async function highlightParcelAtPoint(lng, lat, listingId = null) {
     try {
         const params = new URLSearchParams({
             geometry: `${lng},${lat}`,
@@ -958,7 +973,8 @@ async function highlightParcelAtPoint(lng, lat) {
 
         if (data.features && data.features.length > 0) {
             const feature = data.features[0];
-            feature.id = feature.properties?.SPAN || 'listing-parcel';
+            const props = feature.properties || {};
+            feature.id = props.SPAN || 'listing-parcel';
 
             // Add to highlighted source (separate from main parcels)
             if (!map.getSource('listing-parcel')) {
@@ -994,10 +1010,57 @@ async function highlightParcelAtPoint(lng, lat) {
                 });
             }
 
-            console.log(`Highlighted parcel: ${feature.properties?.SPAN || 'unknown'}, ${feature.properties?.ACRESGL || '?'} acres`);
+            console.log(`Highlighted parcel: ${props.SPAN || 'unknown'}, ${props.ACRESGL || '?'} acres`);
+
+            // If we have a listing ID, save VCGI data to the API
+            if (listingId && props.SPAN) {
+                await saveVcgiDataToListing(listingId, props, feature.geometry);
+            }
         }
     } catch (error) {
         console.warn('Could not highlight parcel:', error);
+    }
+}
+
+// Save VCGI parcel data to a listing via PATCH API
+async function saveVcgiDataToListing(listingId, props, geometry) {
+    try {
+        const vcgiData = {
+            vcgi_span: props.SPAN || null,
+            vcgi_owner: props.OWNER1 || null,
+            vcgi_acres: props.ACRESGL ? parseFloat(props.ACRESGL) : null,
+            vcgi_land_value: props.LAND_LV ? parseInt(props.LAND_LV) : null,
+            vcgi_improvement_value: props.IMPRV_LV ? parseInt(props.IMPRV_LV) : null,
+            vcgi_total_value: props.REAL_FLV ? parseInt(props.REAL_FLV) : null,
+            vcgi_town: props.TNAME || props.TOWNNAME || null,
+            vcgi_property_type: props.PROPTYPE || null,
+            vcgi_geometry: geometry ? JSON.stringify(geometry) : null
+        };
+
+        // Only PATCH if we have meaningful data
+        if (!vcgiData.vcgi_span) return;
+
+        const response = await fetch(`${CONFIG.listingsApiUrl}/listings/${listingId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(vcgiData)
+        });
+
+        if (response.ok) {
+            console.log(`Saved VCGI data for listing ${listingId}: ${vcgiData.vcgi_span}, ${vcgiData.vcgi_acres} acres`);
+
+            // Update local listing data
+            const listing = listings.find(l => l.id === listingId);
+            if (listing) {
+                Object.assign(listing, vcgiData);
+                // Re-render the listings to show updated data
+                renderListings();
+            }
+        } else {
+            console.warn('Failed to save VCGI data:', await response.text());
+        }
+    } catch (error) {
+        console.warn('Could not save VCGI data:', error);
     }
 }
 

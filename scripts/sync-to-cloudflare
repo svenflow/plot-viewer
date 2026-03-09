@@ -1,0 +1,233 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "httpx",
+#     "rich",
+# ]
+# ///
+"""
+Sync scraped listings to Cloudflare D1 via the listings API.
+
+Runs all scrapers, collects results, and pushes to the API.
+
+Usage:
+    sync-to-cloudflare                    # Sync all sources
+    sync-to-cloudflare --source zillow    # Sync only zillow
+    sync-to-cloudflare --dry-run          # Preview without pushing
+"""
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+from datetime import datetime
+
+import httpx
+from rich.console import Console
+from rich.table import Table
+
+console = Console()
+
+# API endpoint
+API_URL = "https://plot-listings-api.nicklaudethorat.workers.dev"
+# For local dev:
+# API_URL = "http://127.0.0.1:8787"
+
+SCRIPTS_DIR = Path(__file__).parent
+
+# Map scrapers to their search commands and state filters
+SCRAPERS = {
+    "zillow": {
+        "script": SCRIPTS_DIR / "zillow",
+        "args": ["search", "VT", "--json"],
+        "source": "zillow",
+    },
+    "redfin": {
+        "script": SCRIPTS_DIR / "redfin",
+        "args": ["search", "VT", "--json"],
+        "source": "redfin",
+    },
+}
+
+
+def run_scraper(name: str, config: dict) -> list[dict]:
+    """Run a scraper and return its results."""
+    console.print(f"[cyan]Running {name} scraper...[/cyan]")
+
+    try:
+        result = subprocess.run(
+            [str(config["script"])] + config["args"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+        if result.returncode != 0:
+            console.print(f"[red]{name} failed: {result.stderr}[/red]")
+            return []
+
+        # Parse JSON output
+        data = json.loads(result.stdout)
+
+        # Normalize results based on scraper format
+        if "results" in data:
+            listings = data["results"]
+        elif isinstance(data, list):
+            listings = data
+        else:
+            listings = []
+
+        console.print(f"[green]{name}: found {len(listings)} listings[/green]")
+        return listings
+
+    except subprocess.TimeoutExpired:
+        console.print(f"[red]{name} timed out[/red]")
+        return []
+    except json.JSONDecodeError as e:
+        console.print(f"[red]{name} returned invalid JSON: {e}[/red]")
+        return []
+    except Exception as e:
+        console.print(f"[red]{name} error: {e}[/red]")
+        return []
+
+
+def normalize_listing(listing: dict, source: str) -> dict:
+    """Normalize a listing from any source to our schema."""
+    normalized = {
+        "source": source,
+        "status": "active",
+    }
+
+    # Zillow format
+    if source == "zillow":
+        normalized.update({
+            "zillow_id": str(listing.get("zpid")) if listing.get("zpid") else None,
+            "address": listing.get("address"),
+            "price": listing.get("price"),
+            "beds": listing.get("beds"),
+            "baths": listing.get("baths"),
+            "sqft": listing.get("sqft"),
+            "lot_acres": listing.get("lotAcres"),
+            "lat": listing.get("lat"),
+            "lng": listing.get("lon"),
+            "primary_image_url": listing.get("imgSrc"),
+            "source_url": listing.get("detailUrl"),
+            "property_type": "single_family",  # Zillow search filters to single family
+        })
+
+    # Redfin format
+    elif source == "redfin":
+        normalized.update({
+            "redfin_id": str(listing.get("home_id")) if listing.get("home_id") else None,
+            "address": listing.get("address"),
+            "city": listing.get("city"),
+            "price": listing.get("price"),
+            "beds": listing.get("beds"),
+            "baths": listing.get("baths"),
+            "sqft": listing.get("sqft"),
+            "source_url": listing.get("url"),
+            "property_type": "single_family",
+        })
+
+        # Parse state from address if available
+        if normalized.get("address") and ", VT" in normalized["address"]:
+            normalized["state"] = "VT"
+
+    # Extract state from address if not set
+    if not normalized.get("state") and normalized.get("address"):
+        addr = normalized["address"]
+        for state in ["VT", "NH", "ME"]:
+            if f", {state}" in addr or addr.endswith(f" {state}"):
+                normalized["state"] = state
+                break
+
+    return normalized
+
+
+def push_to_api(listings: list[dict], dry_run: bool = False) -> dict:
+    """Push listings to the Cloudflare API."""
+    if dry_run:
+        console.print(f"[yellow]DRY RUN: Would push {len(listings)} listings[/yellow]")
+        return {"created": 0, "updated": 0, "skipped": len(listings)}
+
+    console.print(f"[cyan]Pushing {len(listings)} listings to API...[/cyan]")
+
+    try:
+        response = httpx.post(
+            f"{API_URL}/listings/bulk",
+            json={"listings": listings},
+            timeout=60,
+        )
+        response.raise_for_status()
+        result = response.json()
+        console.print(f"[green]Created: {result.get('created', 0)}, Updated: {result.get('updated', 0)}[/green]")
+        return result
+    except Exception as e:
+        console.print(f"[red]API error: {e}[/red]")
+        return {"error": str(e)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Sync scraped listings to Cloudflare")
+    parser.add_argument("--source", help="Only run specific scraper (zillow, redfin)")
+    parser.add_argument("--dry-run", action="store_true", help="Preview without pushing")
+    parser.add_argument("--api-url", help="Override API URL")
+    args = parser.parse_args()
+
+    global API_URL
+    if args.api_url:
+        API_URL = args.api_url
+
+    # Collect all listings
+    all_listings = []
+
+    scrapers_to_run = SCRAPERS if not args.source else {args.source: SCRAPERS[args.source]}
+
+    for name, config in scrapers_to_run.items():
+        raw_listings = run_scraper(name, config)
+        for listing in raw_listings:
+            normalized = normalize_listing(listing, config["source"])
+            if normalized.get("address"):  # Skip invalid listings
+                all_listings.append(normalized)
+
+    console.print(f"\n[bold]Total listings: {len(all_listings)}[/bold]")
+
+    if not all_listings:
+        console.print("[yellow]No listings to sync[/yellow]")
+        return 0
+
+    # Show preview
+    table = Table(title="Listings to sync")
+    table.add_column("Source")
+    table.add_column("Address")
+    table.add_column("Price")
+    table.add_column("Beds/Baths")
+
+    for l in all_listings[:10]:
+        price_str = f"${l.get('price', 0):,}" if l.get('price') else "N/A"
+        beds_baths = f"{l.get('beds', '?')}/{l.get('baths', '?')}"
+        table.add_row(
+            l.get("source", "?"),
+            (l.get("address") or "N/A")[:40],
+            price_str,
+            beds_baths,
+        )
+
+    if len(all_listings) > 10:
+        table.add_row("...", f"({len(all_listings) - 10} more)", "", "")
+
+    console.print(table)
+
+    # Push to API
+    result = push_to_api(all_listings, dry_run=args.dry_run)
+
+    if result.get("error"):
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,294 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "rich",
+#     "scrapling[all]>=0.4",
+# ]
+# ///
+"""
+Vermont Real Estate Company (vermontrealestatecompany.com) property lookup CLI.
+
+Uses scrapling to fetch pages and extract JSON-LD schema.org data.
+
+Usage:
+    vtrec lookup "https://www.vermontrealestatecompany.com/real-estate/206-conway-road-starksboro-vt-05487/5076545/191348686"
+    vtrec search "Vermont" --beds 3
+"""
+
+import argparse
+import json
+import re
+import sys
+from rich.console import Console
+from rich.table import Table
+
+console = Console()
+
+
+def extract_property_data(html: str) -> dict:
+    """Extract property data from HTML using schema.org/JSON-LD and regex patterns."""
+    result = {}
+
+    # Find the SingleFamilyResidence JSON-LD block
+    sfr_start = html.find('"@type": "SingleFamilyResidence"')
+    if sfr_start > 0:
+        brace_pos = html.rfind('{', 0, sfr_start)
+        depth = 0
+        for i, c in enumerate(html[brace_pos:], brace_pos):
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    json_str = html[brace_pos:i+1]
+                    try:
+                        data = json.loads(json_str)
+                        result['name'] = data.get('name')
+                        result['description'] = data.get('description')
+                        result['url'] = data.get('url')
+
+                        if data.get('address'):
+                            result['street'] = data['address'].get('streetAddress')
+                            result['city'] = data['address'].get('addressLocality')
+                            result['state'] = data['address'].get('addressRegion')
+                            result['zip'] = data['address'].get('postalCode')
+
+                        if data.get('geo'):
+                            result['lat'] = data['geo'].get('latitude')
+                            result['lng'] = data['geo'].get('longitude')
+
+                        if data.get('floorSize'):
+                            result['sqft'] = int(data['floorSize'].get('value', 0))
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    break
+
+    # Extract additional fields via regex
+    patterns = {
+        'price': (r'"price"\s*:\s*"?(\d+)"?', int),
+        'beds': (r'"numberOfBedrooms"\s*:\s*"?(\d+)"?', int),
+        'baths': (r'"numberOfBathroomsTotal"\s*:\s*"?(\d+)"?', int),
+        'lot_acres': (r'"lotSize"[^}]+"value"\s*:\s*"?([0-9.]+)"?', float),
+        'year_built': (r'"yearBuilt"\s*:\s*"?(\d+)"?', int),
+    }
+
+    for name, (pattern, converter) in patterns.items():
+        if name not in result:
+            match = re.search(pattern, html)
+            if match:
+                try:
+                    result[name] = converter(match.group(1))
+                except ValueError:
+                    pass
+
+    # MLS number from URL or page
+    mls_match = re.search(r'/(\d{7})/\d+/?$', html) or re.search(r'MLS#?\s*:?\s*(\d+)', html)
+    if mls_match:
+        result['mls'] = mls_match.group(1)
+
+    return result
+
+
+def lookup_with_scrapling(url: str, use_stealthy: bool = False) -> dict:
+    """Look up a property by URL using scrapling."""
+    try:
+        if use_stealthy:
+            from scrapling import StealthyFetcher
+            fetcher = StealthyFetcher()
+            page = fetcher.fetch(url, headless=True)
+        else:
+            from scrapling import Fetcher
+            fetcher = Fetcher()
+            page = fetcher.get(url)
+
+        html = page.html_content
+        data = extract_property_data(html)
+
+        if not data:
+            return {"error": "Could not extract property data"}
+
+        return data
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def search_with_scrapling(location: str, filters: dict, use_stealthy: bool = False) -> dict:
+    """Search for properties on VTREC."""
+    # VTREC search URL format
+    location_slug = location.lower().replace(' ', '-').replace(',', '')
+
+    # Build search URL
+    url = f"https://www.vermontrealestatecompany.com/real-estate/vermont"
+
+    console.print(f"[dim]Searching: {url}[/dim]")
+
+    try:
+        if use_stealthy:
+            from scrapling import StealthyFetcher
+            fetcher = StealthyFetcher()
+            page = fetcher.fetch(url, headless=True)
+        else:
+            from scrapling import Fetcher
+            fetcher = Fetcher()
+            page = fetcher.get(url)
+
+        html = page.html_content
+
+        # Extract listing data from HTML
+        listings = []
+
+        # VTREC embeds listings in various formats - try to find them
+        # Look for listing cards
+        price_pattern = r'\$([0-9,]+)'
+        link_pattern = r'href="(https://www\.vermontrealestatecompany\.com/real-estate/[^"]+)"'
+
+        # Find all property links
+        links = re.findall(link_pattern, html)
+        unique_links = list(set(links))[:20]  # Dedupe and limit
+
+        for link in unique_links:
+            listing = {'url': link}
+
+            # Extract address from URL
+            match = re.search(r'/real-estate/([^/]+)/', link)
+            if match:
+                address = match.group(1).replace('-', ' ').title()
+                listing['address'] = address
+
+            listings.append(listing)
+
+        return {
+            'total': len(listings),
+            'results': listings,
+            'note': 'VTREC search returns links only. Use "vtrec lookup <url>" for full details.'
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def format_property(data: dict) -> None:
+    """Pretty print property data."""
+    if 'error' in data:
+        console.print(f"[red]Error: {data['error']}[/red]")
+        return
+
+    console.print("\n[bold green]Vermont Real Estate Company Listing[/bold green]")
+
+    table = Table(show_header=False)
+    table.add_column("Field", style="cyan", width=15)
+    table.add_column("Value")
+
+    if data.get('name'):
+        table.add_row("Address", data['name'])
+    if data.get('price'):
+        table.add_row("Price", f"${data['price']:,}")
+    if data.get('beds'):
+        table.add_row("Beds", str(data['beds']))
+    if data.get('baths'):
+        table.add_row("Baths", str(data['baths']))
+    if data.get('sqft'):
+        table.add_row("Sqft", f"{data['sqft']:,}")
+    if data.get('lot_acres'):
+        table.add_row("Lot Size", f"{data['lot_acres']:.2f} acres")
+    if data.get('year_built'):
+        table.add_row("Year Built", str(data['year_built']))
+    if data.get('mls'):
+        table.add_row("MLS#", data['mls'])
+
+    console.print(table)
+
+    if data.get('description'):
+        console.print(f"\n[bold]Description:[/bold]")
+        desc = data.get('description', '')
+        console.print(desc[:500] + "..." if len(desc) > 500 else desc)
+
+
+def format_search_results(data: dict) -> None:
+    """Pretty print search results."""
+    if 'error' in data:
+        console.print(f"[red]Error: {data['error']}[/red]")
+        return
+
+    total = data.get('total', 0)
+    results = data.get('results', [])
+
+    console.print(f"\n[bold green]Found {total} listings[/bold green]")
+
+    if data.get('note'):
+        console.print(f"[dim]{data['note']}[/dim]")
+
+    if not results:
+        return
+
+    table = Table()
+    table.add_column("Address", style="cyan", max_width=50)
+    table.add_column("URL", max_width=60)
+
+    for r in results[:20]:
+        table.add_row(
+            r.get('address', 'N/A')[:50],
+            r.get('url', 'N/A')[:60]
+        )
+
+    console.print(table)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Vermont Real Estate Company property lookup (scrapling)")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    # Lookup command
+    lookup_parser = subparsers.add_parser("lookup", help="Look up a property by URL")
+    lookup_parser.add_argument("url", help="Full URL to the property listing")
+    lookup_parser.add_argument("--stealthy", action="store_true", help="Use Stealthy fetcher")
+    lookup_parser.add_argument("--json", action="store_true", help="Output raw JSON")
+
+    # Search command
+    search_parser = subparsers.add_parser("search", help="Search for properties")
+    search_parser.add_argument("location", help="Location to search")
+    search_parser.add_argument("--beds", type=int, help="Minimum bedrooms")
+    search_parser.add_argument("--stealthy", action="store_true", help="Use Stealthy fetcher")
+    search_parser.add_argument("--json", action="store_true", help="Output raw JSON")
+
+    args = parser.parse_args()
+
+    if args.command == "lookup":
+        use_stealthy = getattr(args, 'stealthy', False)
+        data = lookup_with_scrapling(args.url, use_stealthy=False)
+
+        if 'error' in data and not use_stealthy:
+            console.print("[yellow]Tier 1 failed, trying Stealthy (Camoufox)...[/yellow]")
+            data = lookup_with_scrapling(args.url, use_stealthy=True)
+
+        if args.json:
+            print(json.dumps(data, indent=2))
+        else:
+            format_property(data)
+
+    elif args.command == "search":
+        filters = {}
+        if args.beds:
+            filters['min_beds'] = args.beds
+
+        use_stealthy = getattr(args, 'stealthy', False)
+        data = search_with_scrapling(args.location, filters, use_stealthy=False)
+
+        if 'error' in data and not use_stealthy:
+            console.print("[yellow]Tier 1 failed, trying Stealthy (Camoufox)...[/yellow]")
+            data = search_with_scrapling(args.location, filters, use_stealthy=True)
+
+        if args.json:
+            print(json.dumps(data, indent=2))
+        else:
+            format_search_results(data)
+
+    else:
+        parser.print_help()
+        console.print("\n[yellow]Note: For lookups, go to vermontrealestatecompany.com and copy the listing URL[/yellow]")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,178 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["httpx", "rich", "scrapling[all]>=0.4"]
+# ///
+"""
+Hickok & Boardman Real Estate CLI - Vermont ski properties
+
+Scrapes listings from hickokandboardman.com using scrapling.
+
+Usage:
+    hickok search                 # List all VT ski area homes
+    hickok search --town Stowe    # Filter by town
+    hickok search --min-beds 3    # Filter by min bedrooms
+"""
+
+import argparse
+import json
+import re
+import sys
+
+from rich.console import Console
+from rich.table import Table
+
+console = Console()
+
+SKI_RESORTS_URL = "https://www.hickokandboardman.com/vermont/special-markets/homes-sale-near-vermont-ski-resorts.html"
+
+
+def parse_listings(html: str) -> list[dict]:
+    """Parse listings from Hickok & Boardman HTML."""
+    listings = []
+
+    # Find property links and details
+    # H&B uses standard listing card format
+    urls = re.findall(r'href="(/[^"]+mls[^"]+)"', html, re.I)
+    prices = re.findall(r'\$([0-9,]+)', html)
+    addresses = re.findall(r'<[^>]*class="[^"]*address[^"]*"[^>]*>([^<]+)<', html, re.I)
+
+    # Beds/baths patterns
+    beds = re.findall(r'(\d+)\s*(?:bed|br)', html, re.I)
+    baths = re.findall(r'([\d.]+)\s*(?:bath|ba)', html, re.I)
+    sqft = re.findall(r'([\d,]+)\s*(?:sq\.?\s*ft|sqft)', html, re.I)
+
+    for i, url in enumerate(urls[:30]):
+        if not url.startswith('http'):
+            url = f"https://www.hickokandboardman.com{url}"
+
+        result = {
+            'url': url,
+            'source': 'hickok',
+        }
+        if i < len(prices):
+            try:
+                result['price'] = int(prices[i].replace(',', ''))
+            except:
+                pass
+        if i < len(addresses):
+            result['address'] = addresses[i].strip()
+        if i < len(beds):
+            try:
+                result['beds'] = int(beds[i])
+            except:
+                pass
+        if i < len(baths):
+            try:
+                result['baths'] = float(baths[i])
+            except:
+                pass
+        if i < len(sqft):
+            try:
+                result['sqft'] = int(sqft[i].replace(',', ''))
+            except:
+                pass
+        listings.append(result)
+
+    return listings
+
+
+def search_hickok(town: str = None, min_beds: int = None, min_baths: int = None,
+                  max_price: int = None, min_acres: float = None) -> dict:
+    """Search Hickok & Boardman ski homes."""
+    try:
+        from scrapling import Fetcher
+
+        page = Fetcher().get(SKI_RESORTS_URL)
+        html = page.html_content
+
+        listings = parse_listings(html)
+
+        # Apply filters
+        if town:
+            town_lower = town.lower()
+            listings = [l for l in listings if town_lower in l.get('address', '').lower()]
+        if min_beds:
+            listings = [l for l in listings if l.get('beds', 0) >= min_beds]
+        if min_baths:
+            listings = [l for l in listings if l.get('baths', 0) >= min_baths]
+        if max_price:
+            listings = [l for l in listings if l.get('price', float('inf')) <= max_price]
+
+        return {
+            'totalResults': len(listings),
+            'results': listings,
+            'url': SKI_RESORTS_URL,
+            'source': 'hickok',
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def format_results(data: dict) -> None:
+    """Pretty print results."""
+    if 'error' in data:
+        console.print(f"[red]Error: {data['error']}[/red]")
+        return
+
+    results = data.get('results', [])
+    console.print(f"\n[bold green]Found {len(results)} properties[/bold green]")
+
+    if not results:
+        return
+
+    table = Table()
+    table.add_column("Address", style="cyan", max_width=30)
+    table.add_column("Price", justify="right")
+    table.add_column("Bed/Bath")
+    table.add_column("Sqft", justify="right")
+
+    for r in results[:20]:
+        price = f"${r['price']:,}" if r.get('price') else 'N/A'
+        bb = f"{r.get('beds', '?')}/{r.get('baths', '?')}"
+        sqft = f"{r['sqft']:,}" if r.get('sqft') else 'N/A'
+
+        table.add_row(
+            r.get('address', 'N/A')[:30],
+            price,
+            bb,
+            sqft,
+        )
+
+    console.print(table)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Hickok & Boardman VT ski property search (scrapling)")
+    subparsers = parser.add_subparsers(dest="command")
+
+    search_parser = subparsers.add_parser("search", help="Search ski homes")
+    search_parser.add_argument("--town", help="Filter by town name")
+    search_parser.add_argument("--min-beds", type=int, help="Minimum bedrooms")
+    search_parser.add_argument("--min-baths", type=int, help="Minimum bathrooms")
+    search_parser.add_argument("--max-price", type=int, help="Maximum price")
+    search_parser.add_argument("--min-acres", type=float, help="Minimum acres")
+    search_parser.add_argument("--json", action="store_true", help="JSON output")
+
+    args = parser.parse_args()
+
+    if args.command == "search":
+        data = search_hickok(
+            town=args.town,
+            min_beds=args.min_beds,
+            min_baths=args.min_baths,
+            max_price=args.max_price,
+            min_acres=args.min_acres,
+        )
+
+        if args.json:
+            print(json.dumps(data, indent=2))
+        else:
+            format_results(data)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

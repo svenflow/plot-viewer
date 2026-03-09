@@ -1,0 +1,177 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["httpx", "rich", "scrapling[all]>=0.4"]
+# ///
+"""
+LakeHomes.com CLI - Search Vermont lake properties
+
+Scrapes lakehomes.com using scrapling.
+
+Usage:
+    lakehomes search                   # All Vermont lake homes
+    lakehomes search --min-beds 3      # 3+ bedrooms
+    lakehomes search --max-price 1M    # Under $1M
+"""
+
+import argparse
+import json
+import re
+import sys
+
+from rich.console import Console
+from rich.table import Table
+
+console = Console()
+
+VT_LAKES_URL = "https://www.lakehomes.com/vermont"
+
+
+def parse_listings(html: str) -> list[dict]:
+    """Parse listings from LakeHomes HTML."""
+    listings = []
+
+    # Find property URLs and data
+    urls = re.findall(r'href="(https://www\.lakehomes\.com/[^"]+/[0-9]+)"', html)
+    prices = re.findall(r'\$([0-9,]+)', html)
+
+    # Beds/baths
+    beds = re.findall(r'(\d+)\s*(?:bed|br)', html, re.I)
+    baths = re.findall(r'([\d.]+)\s*(?:bath|ba)', html, re.I)
+    sqft = re.findall(r'([\d,]+)\s*(?:sq\.?\s*ft|sqft)', html, re.I)
+    acres = re.findall(r'([\d.]+)\s*(?:acre|ac)', html, re.I)
+
+    for i, url in enumerate(urls[:30]):
+        result = {
+            'url': url,
+            'source': 'lakehomes',
+        }
+        if i < len(prices):
+            try:
+                result['price'] = int(prices[i].replace(',', ''))
+            except:
+                pass
+        if i < len(beds):
+            try:
+                result['beds'] = int(beds[i])
+            except:
+                pass
+        if i < len(baths):
+            try:
+                result['baths'] = float(baths[i])
+            except:
+                pass
+        if i < len(sqft):
+            try:
+                result['sqft'] = int(sqft[i].replace(',', ''))
+            except:
+                pass
+        if i < len(acres):
+            try:
+                result['acres'] = float(acres[i])
+            except:
+                pass
+        listings.append(result)
+
+    return listings
+
+
+def search_lakehomes(min_beds: int = None, min_baths: int = None,
+                     max_price: int = None, min_acres: float = None) -> dict:
+    """Search LakeHomes Vermont properties."""
+    try:
+        from scrapling import Fetcher
+
+        page = Fetcher().get(VT_LAKES_URL)
+        html = page.html_content
+
+        listings = parse_listings(html)
+
+        # Apply filters
+        if min_beds:
+            listings = [l for l in listings if l.get('beds', 0) >= min_beds]
+        if min_baths:
+            listings = [l for l in listings if l.get('baths', 0) >= min_baths]
+        if max_price:
+            listings = [l for l in listings if l.get('price', float('inf')) <= max_price]
+        if min_acres:
+            listings = [l for l in listings if l.get('acres', 0) >= min_acres]
+
+        return {
+            'totalResults': len(listings),
+            'results': listings,
+            'url': VT_LAKES_URL,
+            'source': 'lakehomes',
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def format_results(data: dict) -> None:
+    """Pretty print results."""
+    if 'error' in data:
+        console.print(f"[red]Error: {data['error']}[/red]")
+        return
+
+    results = data.get('results', [])
+    console.print(f"\n[bold green]Found {len(results)} lake properties[/bold green]")
+
+    if not results:
+        return
+
+    table = Table()
+    table.add_column("Price", justify="right")
+    table.add_column("Bed/Bath")
+    table.add_column("Sqft", justify="right")
+    table.add_column("Acres", justify="right")
+    table.add_column("URL", style="blue", max_width=40)
+
+    for r in results[:20]:
+        price = f"${r['price']:,}" if r.get('price') else 'N/A'
+        bb = f"{r.get('beds', '?')}/{r.get('baths', '?')}"
+        sqft = f"{r['sqft']:,}" if r.get('sqft') else 'N/A'
+        acres = f"{r['acres']:.1f}" if r.get('acres') else 'N/A'
+
+        table.add_row(
+            price,
+            bb,
+            sqft,
+            acres,
+            r.get('url', '')[-40:],
+        )
+
+    console.print(table)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="LakeHomes Vermont search (scrapling)")
+    subparsers = parser.add_subparsers(dest="command")
+
+    search_parser = subparsers.add_parser("search", help="Search lake homes")
+    search_parser.add_argument("--min-beds", type=int, help="Minimum bedrooms")
+    search_parser.add_argument("--min-baths", type=int, help="Minimum bathrooms")
+    search_parser.add_argument("--max-price", type=int, help="Maximum price")
+    search_parser.add_argument("--min-acres", type=float, help="Minimum acres")
+    search_parser.add_argument("--json", action="store_true", help="JSON output")
+
+    args = parser.parse_args()
+
+    if args.command == "search":
+        data = search_lakehomes(
+            min_beds=args.min_beds,
+            min_baths=args.min_baths,
+            max_price=args.max_price,
+            min_acres=args.min_acres,
+        )
+
+        if args.json:
+            print(json.dumps(data, indent=2))
+        else:
+            format_results(data)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

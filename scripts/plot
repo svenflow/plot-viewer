@@ -1,0 +1,616 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["httpx", "rich"]
+# ///
+"""
+plot - CLI for managing plot-viewer favorites (listings)
+
+Manages Vermont property listings stored in Cloudflare KV via the plot-viewer API.
+
+Usage:
+    plot list                              # List all favorites
+    plot list --status interested          # Filter by status
+    plot get <id>                          # Get single favorite
+    plot add --name "Town" --acres 50 ...  # Add new listing
+    plot update <id> --status visited      # Update listing
+    plot delete <id>                       # Remove listing
+    plot search --town STOCKBRIDGE         # Search parcels (VCGI)
+    plot import <span>                     # Import from VCGI by SPAN
+"""
+
+import sys
+import json
+import argparse
+from typing import Optional
+
+import httpx
+from rich.console import Console
+from rich.table import Table
+
+__version__ = "1.0.0"
+
+API_BASE = "https://sven-plot-proxy.nicklaudethorat.workers.dev"
+VCGI_PARCELS_URL = "https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services/FS_VCGI_OPENDATA_Cadastral_VTPARCELS_poly_standardized_parcels_SP_v1/FeatureServer/0/query"
+
+console = Console()
+
+
+# ============================================================================
+# Utility functions
+# ============================================================================
+
+def escape_arcgis_value(val: str) -> str:
+    """Escape single quotes for ArcGIS WHERE clause."""
+    return val.replace("'", "''")
+
+
+def parse_center(center: str) -> list[float]:
+    """Parse 'lng,lat' string to [lng, lat] coordinate array."""
+    parts = center.split(",")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid center format '{center}' - expected 'lng,lat'")
+    try:
+        lng, lat = float(parts[0].strip()), float(parts[1].strip())
+    except ValueError:
+        raise ValueError(f"Invalid coordinates in '{center}' - must be numeric")
+    if not (-180 <= lng <= 180) or not (-90 <= lat <= 90):
+        raise ValueError(f"Coordinates out of range: lng={lng}, lat={lat}")
+    return [lng, lat]
+
+
+def parse_tags(tags: str) -> list[str]:
+    """Parse comma-separated tags, filtering empty strings."""
+    return [t.strip() for t in tags.split(",") if t.strip()]
+
+
+def calculate_center(geom: dict) -> list[float]:
+    """Calculate centroid from GeoJSON geometry (Polygon or MultiPolygon)."""
+    geom_type = geom.get("type", "")
+    coords = geom.get("coordinates", [])
+
+    if geom_type == "Polygon" and coords:
+        ring = coords[0]
+    elif geom_type == "MultiPolygon" and coords:
+        # Use first polygon's exterior ring
+        ring = coords[0][0]
+    else:
+        return [0.0, 0.0]
+
+    if not ring:
+        return [0.0, 0.0]
+
+    lngs = [c[0] for c in ring]
+    lats = [c[1] for c in ring]
+    return [(min(lngs) + max(lngs)) / 2, (min(lats) + max(lats)) / 2]
+
+
+def validate_positive(value: float, name: str) -> float:
+    """Ensure value is positive."""
+    if value <= 0:
+        raise ValueError(f"{name} must be positive, got {value}")
+    return value
+
+
+# ============================================================================
+# API functions
+# ============================================================================
+
+def list_favorites(status: Optional[str] = None, json_output: bool = False) -> None:
+    """List all favorites, optionally filtered by status."""
+    resp = httpx.get(f"{API_BASE}/favorites", timeout=30)
+    resp.raise_for_status()
+    favorites = resp.json()
+
+    if status:
+        favorites = [f for f in favorites if f.get("status") == status]
+
+    if json_output:
+        print(json.dumps(favorites, indent=2))
+        return
+
+    if not favorites:
+        console.print("[yellow]No favorites found[/]")
+        return
+
+    table = Table(title=f"Favorites ({len(favorites)})")
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Name", style="green")
+    table.add_column("Acres", justify="right")
+    table.add_column("Address")
+    table.add_column("Price", justify="right")
+    table.add_column("Status", style="bold")
+    table.add_column("Listing", style="blue")
+
+    status_colors = {
+        "interested": "blue",
+        "visited": "yellow",
+        "offer-made": "purple",
+        "purchased": "green",
+        "rejected": "dim",
+    }
+
+    for fav in favorites:
+        status_val = fav.get("status", "interested")
+        status_color = status_colors.get(status_val, "white")
+        price = f"${fav['price']:,.0f}" if fav.get("price") else "-"
+        listing_url = fav.get("listingUrl", "-")
+        if listing_url and listing_url != "-" and len(listing_url) > 30:
+            listing_url = listing_url[:27] + "..."
+
+        table.add_row(
+            fav["id"][:20] + ("..." if len(fav["id"]) > 20 else ""),
+            fav.get("name", "?"),
+            f"{fav.get('acres', 0):.1f}",
+            fav.get("address", "-"),
+            price,
+            f"[{status_color}]{status_val}[/]",
+            listing_url,
+        )
+
+    console.print(table)
+
+
+def get_favorite(id: str, json_output: bool = False) -> None:
+    """Get a single favorite by ID."""
+    resp = httpx.get(f"{API_BASE}/favorites/{id}", timeout=30)
+    if resp.status_code == 404:
+        if json_output:
+            print(json.dumps({"error": "not_found", "id": id}))
+        else:
+            console.print(f"[red]Favorite not found: {id}[/]")
+        sys.exit(1)
+    resp.raise_for_status()
+    fav = resp.json()
+
+    if json_output:
+        print(json.dumps(fav, indent=2))
+        return
+
+    console.print(f"\n[bold cyan]{fav.get('name', 'Unnamed')}[/]")
+    console.print(f"  ID: {fav['id']}")
+    console.print(f"  Acres: {fav.get('acres', 0):.1f}")
+    console.print(f"  Address: {fav.get('address', '-')}")
+    console.print(f"  Status: {fav.get('status', '-')}")
+    if fav.get("price"):
+        console.print(f"  Price: ${fav['price']:,.0f}")
+    if fav.get("listingStatus"):
+        console.print(f"  Listing Status: {fav['listingStatus']}")
+    if fav.get("listingUrl"):
+        console.print(f"  Listing URL: {fav['listingUrl']}")
+    if fav.get("notes"):
+        console.print(f"  Notes: {fav['notes']}")
+    if fav.get("tags"):
+        console.print(f"  Tags: {', '.join(fav['tags'])}")
+    if fav.get("center"):
+        console.print(f"  Center: {fav['center'][1]:.6f}, {fav['center'][0]:.6f}")
+    console.print(f"  Created: {fav.get('createdAt', '-')}")
+    console.print(f"  Updated: {fav.get('updatedAt', '-')}")
+    console.print()
+
+
+def add_favorite(
+    name: str,
+    acres: float,
+    address: str = "",
+    center: Optional[str] = None,
+    price: Optional[float] = None,
+    listing_status: Optional[str] = None,
+    listing_url: Optional[str] = None,
+    notes: Optional[str] = None,
+    tags: Optional[str] = None,
+    status: str = "interested",
+    id: Optional[str] = None,
+    json_output: bool = False,
+) -> None:
+    """Add a new favorite."""
+    # Validate inputs
+    validate_positive(acres, "acres")
+
+    data: dict = {
+        "name": name,
+        "acres": acres,
+        "address": address,
+        "status": status,
+    }
+
+    if id:
+        data["id"] = id
+    if center:
+        data["center"] = parse_center(center)
+    if price is not None:
+        data["price"] = price
+    if listing_status:
+        data["listingStatus"] = listing_status
+    if listing_url:
+        data["listingUrl"] = listing_url
+    if notes:
+        data["notes"] = notes
+    if tags:
+        parsed_tags = parse_tags(tags)
+        if parsed_tags:
+            data["tags"] = parsed_tags
+
+    resp = httpx.post(f"{API_BASE}/favorites", json=data, timeout=30)
+    resp.raise_for_status()
+    fav = resp.json()
+
+    if json_output:
+        print(json.dumps(fav, indent=2))
+    else:
+        console.print(f"[green]✓ Added favorite: {fav['id']}[/]")
+
+
+def update_favorite(
+    id: str,
+    name: Optional[str] = None,
+    acres: Optional[float] = None,
+    address: Optional[str] = None,
+    center: Optional[str] = None,
+    price: Optional[float] = None,
+    listing_status: Optional[str] = None,
+    listing_url: Optional[str] = None,
+    notes: Optional[str] = None,
+    tags: Optional[str] = None,
+    status: Optional[str] = None,
+    json_output: bool = False,
+) -> None:
+    """Update an existing favorite."""
+    data: dict = {}
+    if name is not None:
+        data["name"] = name
+    if acres is not None:
+        validate_positive(acres, "acres")
+        data["acres"] = acres
+    if address is not None:
+        data["address"] = address
+    if center is not None:
+        data["center"] = parse_center(center)
+    if price is not None:
+        data["price"] = price
+    if listing_status is not None:
+        data["listingStatus"] = listing_status
+    if listing_url is not None:
+        data["listingUrl"] = listing_url
+    if notes is not None:
+        data["notes"] = notes
+    if tags is not None:
+        parsed_tags = parse_tags(tags)
+        data["tags"] = parsed_tags  # Allow empty list to clear tags
+    if status is not None:
+        data["status"] = status
+
+    if not data:
+        if json_output:
+            print(json.dumps({"error": "no_fields", "message": "No fields to update"}))
+        else:
+            console.print("[yellow]No fields to update[/]")
+        return
+
+    resp = httpx.put(f"{API_BASE}/favorites/{id}", json=data, timeout=30)
+    if resp.status_code == 404:
+        if json_output:
+            print(json.dumps({"error": "not_found", "id": id}))
+        else:
+            console.print(f"[red]Favorite not found: {id}[/]")
+        sys.exit(1)
+    resp.raise_for_status()
+    fav = resp.json()
+
+    if json_output:
+        print(json.dumps(fav, indent=2))
+    else:
+        console.print(f"[green]✓ Updated favorite: {fav['id']}[/]")
+
+
+def delete_favorite(id: str, force: bool = False, json_output: bool = False) -> None:
+    """Delete a favorite."""
+    if not force and not json_output:
+        confirm = input(f"Delete favorite {id}? [y/N] ")
+        if confirm.lower() != "y":
+            console.print("[yellow]Cancelled[/]")
+            return
+
+    resp = httpx.delete(f"{API_BASE}/favorites/{id}", timeout=30)
+    if resp.status_code == 404:
+        if json_output:
+            print(json.dumps({"error": "not_found", "id": id}))
+        else:
+            console.print(f"[red]Favorite not found: {id}[/]")
+        sys.exit(1)
+    resp.raise_for_status()
+
+    if json_output:
+        print(json.dumps({"deleted": True, "id": id}))
+    else:
+        console.print(f"[green]✓ Deleted favorite: {id}[/]")
+
+
+def search_parcels(
+    town: Optional[str] = None,
+    min_acres: Optional[float] = None,
+    max_acres: Optional[float] = None,
+    address: Optional[str] = None,
+    span: Optional[str] = None,
+    limit: int = 20,
+    json_output: bool = False,
+) -> None:
+    """Search Vermont parcels via VCGI ArcGIS service."""
+    conditions = []
+    if town:
+        conditions.append(f"TNAME='{escape_arcgis_value(town.upper())}'")
+    if min_acres is not None:
+        conditions.append(f"ACRESGL>={min_acres}")
+    if max_acres is not None:
+        conditions.append(f"ACRESGL<={max_acres}")
+    if address:
+        conditions.append(f"E911ADDR LIKE '%{escape_arcgis_value(address.upper())}%'")
+    if span:
+        conditions.append(f"SPAN='{escape_arcgis_value(span)}'")
+
+    if not conditions:
+        if json_output:
+            print(json.dumps({"error": "no_filters", "message": "At least one search filter required"}))
+        else:
+            console.print("[red]At least one search filter required (--town, --span, --address, --min-acres, --max-acres)[/]")
+        sys.exit(1)
+
+    where = " AND ".join(conditions)
+    params = {
+        "where": where,
+        "outFields": "SPAN,TNAME,OWNER1,ACRESGL,E911ADDR,LAND_LV,REAL_FLV",
+        "returnGeometry": "false",
+        "resultRecordCount": limit,
+        "orderByFields": "ACRESGL DESC",
+        "f": "json",
+    }
+
+    resp = httpx.get(VCGI_PARCELS_URL, params=params, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+
+    features = data.get("features", [])
+
+    if json_output:
+        print(json.dumps(features, indent=2))
+        return
+
+    if not features:
+        console.print("[yellow]No parcels found[/]")
+        return
+
+    table = Table(title=f"Parcels ({len(features)})")
+    table.add_column("SPAN", style="cyan")
+    table.add_column("Town", style="green")
+    table.add_column("Acres", justify="right")
+    table.add_column("Address")
+    table.add_column("Owner")
+    table.add_column("Value", justify="right")
+
+    for feat in features:
+        attrs = feat.get("attributes", {})
+        value = attrs.get("REAL_FLV", 0)
+        value_str = f"${value:,.0f}" if value else "-"
+        owner = attrs.get("OWNER1", "-") or "-"
+        if len(owner) > 25:
+            owner = owner[:22] + "..."
+
+        table.add_row(
+            attrs.get("SPAN", "?"),
+            attrs.get("TNAME", "?"),
+            f"{attrs.get('ACRESGL', 0):.1f}",
+            attrs.get("E911ADDR", "-") or "-",
+            owner,
+            value_str,
+        )
+
+    console.print(table)
+
+
+def import_from_vcgi(
+    span: str,
+    status: str = "interested",
+    notes: Optional[str] = None,
+    json_output: bool = False,
+) -> None:
+    """Import a parcel from VCGI by SPAN and add to favorites."""
+    params = {
+        "where": f"SPAN='{escape_arcgis_value(span)}'",
+        "outFields": "*",
+        "returnGeometry": "true",
+        "outSR": "4326",
+        "f": "geojson",
+    }
+
+    resp = httpx.get(VCGI_PARCELS_URL, params=params, timeout=30)
+    resp.raise_for_status()
+    result = resp.json()
+
+    features = result.get("features", [])
+    if not features:
+        if json_output:
+            print(json.dumps({"error": "not_found", "span": span}))
+        else:
+            console.print(f"[red]Parcel not found with SPAN: {span}[/]")
+        sys.exit(1)
+
+    feat = features[0]
+    props = feat.get("properties", {})
+    geom = feat.get("geometry", {})
+
+    # Calculate center from polygon (handles Polygon and MultiPolygon)
+    center = calculate_center(geom)
+
+    data: dict = {
+        "id": span,
+        "name": props.get("TNAME", "Unknown"),
+        "acres": props.get("ACRESGL", 0),
+        "address": props.get("E911ADDR", "") or "",
+        "center": center,
+        "price": props.get("REAL_FLV", 0) or None,
+        "status": status,
+        "polygon": geom.get("coordinates"),
+    }
+    if notes:
+        data["notes"] = notes
+
+    # Clean None values
+    data = {k: v for k, v in data.items() if v is not None}
+
+    resp = httpx.post(f"{API_BASE}/favorites", json=data, timeout=30)
+    resp.raise_for_status()
+    fav = resp.json()
+
+    if json_output:
+        print(json.dumps(fav, indent=2))
+    else:
+        console.print(f"[green]✓ Imported from VCGI: {fav['id']} ({fav['name']}, {fav['acres']:.1f} acres)[/]")
+
+
+# ============================================================================
+# Main entry point
+# ============================================================================
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="CLI for managing plot-viewer favorites (Vermont property listings)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--json", action="store_true", help="Output as JSON")
+    parser.add_argument("--version", "-V", action="version", version=f"plot {__version__}")
+
+    subparsers = parser.add_subparsers(dest="command", help="Command")
+
+    # list
+    list_parser = subparsers.add_parser("list", aliases=["ls"], help="List all favorites")
+    list_parser.add_argument("--status", "-s", choices=["interested", "visited", "offer-made", "purchased", "rejected"], help="Filter by status")
+
+    # get
+    get_parser = subparsers.add_parser("get", help="Get a single favorite")
+    get_parser.add_argument("id", help="Favorite ID (SPAN or UUID)")
+
+    # add
+    add_parser = subparsers.add_parser("add", help="Add a new favorite")
+    add_parser.add_argument("--id", help="ID (uses UUID if not provided)")
+    add_parser.add_argument("--name", "-n", required=True, help="Town/property name")
+    add_parser.add_argument("--acres", "-a", type=float, required=True, help="Acreage")
+    add_parser.add_argument("--address", help="Street address")
+    add_parser.add_argument("--center", help="Center coordinates as 'lng,lat'")
+    add_parser.add_argument("--price", type=float, help="Price or value")
+    add_parser.add_argument("--listing-status", choices=["available", "pending", "sold", "off-market"], help="Listing status")
+    add_parser.add_argument("--listing-url", help="URL to listing")
+    add_parser.add_argument("--notes", help="Notes")
+    add_parser.add_argument("--tags", help="Comma-separated tags")
+    add_parser.add_argument("--status", "-s", default="interested", choices=["interested", "visited", "offer-made", "purchased", "rejected"], help="Status")
+
+    # update
+    update_parser = subparsers.add_parser("update", help="Update a favorite")
+    update_parser.add_argument("id", help="Favorite ID")
+    update_parser.add_argument("--name", "-n", help="Town/property name")
+    update_parser.add_argument("--acres", "-a", type=float, help="Acreage")
+    update_parser.add_argument("--address", help="Street address")
+    update_parser.add_argument("--center", help="Center coordinates as 'lng,lat'")
+    update_parser.add_argument("--price", type=float, help="Price or value")
+    update_parser.add_argument("--listing-status", choices=["available", "pending", "sold", "off-market"], help="Listing status")
+    update_parser.add_argument("--listing-url", help="URL to listing")
+    update_parser.add_argument("--notes", help="Notes")
+    update_parser.add_argument("--tags", help="Comma-separated tags")
+    update_parser.add_argument("--status", "-s", choices=["interested", "visited", "offer-made", "purchased", "rejected"], help="Status")
+
+    # delete
+    delete_parser = subparsers.add_parser("delete", aliases=["rm"], help="Delete a favorite")
+    delete_parser.add_argument("id", help="Favorite ID")
+    delete_parser.add_argument("--force", "-f", action="store_true", help="Skip confirmation")
+
+    # search
+    search_parser = subparsers.add_parser("search", help="Search Vermont parcels (VCGI)")
+    search_parser.add_argument("--town", "-t", help="Town name (e.g., STOCKBRIDGE)")
+    search_parser.add_argument("--min-acres", type=float, help="Minimum acreage")
+    search_parser.add_argument("--max-acres", type=float, help="Maximum acreage")
+    search_parser.add_argument("--address", help="Address pattern")
+    search_parser.add_argument("--span", help="SPAN (exact)")
+    search_parser.add_argument("--limit", "-l", type=int, default=20, help="Max results")
+
+    # import
+    import_parser = subparsers.add_parser("import", help="Import parcel from VCGI by SPAN")
+    import_parser.add_argument("span", help="SPAN to import")
+    import_parser.add_argument("--status", "-s", default="interested", choices=["interested", "visited", "offer-made", "purchased", "rejected"], help="Status")
+    import_parser.add_argument("--notes", help="Notes to add")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    try:
+        if args.command in ["list", "ls"]:
+            list_favorites(status=args.status, json_output=args.json)
+        elif args.command == "get":
+            get_favorite(args.id, json_output=args.json)
+        elif args.command == "add":
+            add_favorite(
+                name=args.name,
+                acres=args.acres,
+                address=args.address or "",
+                center=args.center,
+                price=args.price,
+                listing_status=args.listing_status,
+                listing_url=args.listing_url,
+                notes=args.notes,
+                tags=args.tags,
+                status=args.status,
+                id=args.id,
+                json_output=args.json,
+            )
+        elif args.command == "update":
+            update_favorite(
+                id=args.id,
+                name=args.name,
+                acres=args.acres,
+                address=args.address,
+                center=args.center,
+                price=args.price,
+                listing_status=args.listing_status,
+                listing_url=args.listing_url,
+                notes=args.notes,
+                tags=args.tags,
+                status=args.status,
+                json_output=args.json,
+            )
+        elif args.command in ["delete", "rm"]:
+            delete_favorite(args.id, force=args.force, json_output=args.json)
+        elif args.command == "search":
+            search_parcels(
+                town=args.town,
+                min_acres=args.min_acres,
+                max_acres=args.max_acres,
+                address=args.address,
+                span=args.span,
+                limit=args.limit,
+                json_output=args.json,
+            )
+        elif args.command == "import":
+            import_from_vcgi(args.span, status=args.status, notes=args.notes, json_output=args.json)
+    except ValueError as e:
+        if args.json:
+            print(json.dumps({"error": "validation_error", "message": str(e)}))
+        else:
+            console.print(f"[red]Validation error: {e}[/]")
+        sys.exit(1)
+    except httpx.HTTPStatusError as e:
+        if args.json:
+            print(json.dumps({"error": "api_error", "status_code": e.response.status_code, "message": e.response.text}))
+        else:
+            console.print(f"[red]API error: {e.response.status_code} {e.response.text}[/]")
+        sys.exit(1)
+    except httpx.RequestError as e:
+        if args.json:
+            print(json.dumps({"error": "request_error", "message": str(e)}))
+        else:
+            console.print(f"[red]Request error: {e}[/]")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

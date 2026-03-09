@@ -482,6 +482,44 @@ async function handlePatchListing(id: string, request: Request, env: Env, corsHe
     params.push(JSON.stringify(data.enrichment));
   }
 
+  // VCGI fields
+  if ((data as any).vcgi_span !== undefined) {
+    updates.push('vcgi_span = ?');
+    params.push((data as any).vcgi_span);
+  }
+  if ((data as any).vcgi_owner !== undefined) {
+    updates.push('vcgi_owner = ?');
+    params.push((data as any).vcgi_owner);
+  }
+  if ((data as any).vcgi_acres !== undefined) {
+    updates.push('vcgi_acres = ?');
+    params.push((data as any).vcgi_acres);
+  }
+  if ((data as any).vcgi_land_value !== undefined) {
+    updates.push('vcgi_land_value = ?');
+    params.push((data as any).vcgi_land_value);
+  }
+  if ((data as any).vcgi_improvement_value !== undefined) {
+    updates.push('vcgi_improvement_value = ?');
+    params.push((data as any).vcgi_improvement_value);
+  }
+  if ((data as any).vcgi_total_value !== undefined) {
+    updates.push('vcgi_total_value = ?');
+    params.push((data as any).vcgi_total_value);
+  }
+  if ((data as any).vcgi_town !== undefined) {
+    updates.push('vcgi_town = ?');
+    params.push((data as any).vcgi_town);
+  }
+  if ((data as any).vcgi_property_type !== undefined) {
+    updates.push('vcgi_property_type = ?');
+    params.push((data as any).vcgi_property_type);
+  }
+  if ((data as any).vcgi_geometry !== undefined) {
+    updates.push('vcgi_geometry = ?');
+    params.push((data as any).vcgi_geometry);
+  }
+
   if (updates.length === 0) {
     return new Response(JSON.stringify({ error: 'No fields to update' }), {
       status: 400,

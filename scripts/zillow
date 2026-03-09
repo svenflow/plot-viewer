@@ -1,0 +1,277 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "httpx",
+#     "rich",
+#     "scrapling[all]>=0.4",
+# ]
+# ///
+"""
+Zillow property search CLI using scrapling for headless scraping.
+
+Usage:
+    zillow search "Vermont" --beds 3 --baths 3 --min-acres 10
+    zillow search VT --max-price 1500000 --json
+    zillow lookup "206 Conway Road, Starksboro VT"
+"""
+
+import argparse
+import json
+import re
+import sys
+import urllib.parse
+from typing import Optional
+
+import httpx
+from rich.console import Console
+from rich.table import Table
+
+console = Console()
+
+
+def zillow_autocomplete(query: str) -> dict:
+    """Search for properties/locations via Zillow autocomplete API."""
+    url = "https://www.zillowstatic.com/autocomplete/v3/suggestions"
+    params = {'q': query}
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Accept': '*/*',
+    }
+
+    response = httpx.get(url, params=params, headers=headers, timeout=15)
+    response.raise_for_status()
+    return response.json()
+
+
+def build_search_url(region: str, **filters) -> str:
+    """Build Zillow search URL with filters."""
+    filter_state = {
+        "sort": {"value": "days"},
+        "ah": {"value": True},
+        "con": {"value": False},  # No condos
+    }
+
+    if filters.get('min_beds'):
+        filter_state["beds"] = {"min": filters['min_beds']}
+    if filters.get('min_baths'):
+        filter_state["baths"] = {"min": filters['min_baths']}
+    if filters.get('min_price'):
+        filter_state["price"] = filter_state.get("price", {})
+        filter_state["price"]["min"] = filters['min_price']
+    if filters.get('max_price'):
+        filter_state["price"] = filter_state.get("price", {})
+        filter_state["price"]["max"] = filters['max_price']
+    if filters.get('min_sqft'):
+        filter_state["sqft"] = {"min": filters['min_sqft']}
+    if filters.get('min_lot_sqft'):
+        filter_state["lot"] = {"min": filters['min_lot_sqft']}
+    if filters.get('waterfront'):
+        filter_state["waterfront"] = {"value": True}
+
+    search_state = {
+        "pagination": {},
+        "isMapVisible": True,
+        "filterState": filter_state,
+    }
+
+    encoded = urllib.parse.quote(json.dumps(search_state))
+
+    state_map = {
+        'vermont': 'vt', 'new hampshire': 'nh', 'maine': 'me',
+        'vt': 'vt', 'nh': 'nh', 'me': 'me',
+    }
+
+    region_lower = region.lower().replace(' ', '-')
+    state_code = state_map.get(region_lower, region_lower)
+    return f"https://www.zillow.com/{state_code}/?searchQueryState={encoded}"
+
+
+def search_with_scrapling(url: str, use_stealthy: bool = False) -> dict:
+    """Fetch Zillow search results using scrapling."""
+    try:
+        if use_stealthy:
+            from scrapling import StealthyFetcher
+            fetcher = StealthyFetcher()
+            page = fetcher.fetch(url, headless=True)
+        else:
+            from scrapling import Fetcher
+            fetcher = Fetcher()
+            page = fetcher.get(url)
+
+        html = page.html_content
+
+        # Extract __NEXT_DATA__ JSON from the page
+        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>', html, re.DOTALL)
+        if not match:
+            return {"error": "Could not find __NEXT_DATA__ in page"}
+
+        data = json.loads(match.group(1))
+        page_props = data.get('props', {}).get('pageProps', {})
+        search_state = page_props.get('searchPageState', {})
+        cat1 = search_state.get('cat1', {})
+        search_results = cat1.get('searchResults', {})
+        list_results = search_results.get('listResults', [])
+
+        results = []
+        for r in list_results:
+            results.append({
+                'zpid': r.get('zpid'),
+                'address': r.get('address'),
+                'price': r.get('unformattedPrice'),
+                'beds': r.get('beds'),
+                'baths': r.get('baths'),
+                'sqft': r.get('area'),
+                'lotAcres': r.get('lotAreaValue') if r.get('lotAreaUnit') == 'acres' else None,
+                'lat': r.get('latLong', {}).get('latitude'),
+                'lon': r.get('latLong', {}).get('longitude'),
+                'statusType': r.get('statusType'),
+                'imgSrc': r.get('imgSrc'),
+                'detailUrl': r.get('detailUrl'),
+            })
+
+        return {
+            'totalResults': search_results.get('totalResultCount', len(results)),
+            'results': results,
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def search_zillow(region: str, filters: dict, use_stealthy: bool = False) -> dict:
+    """Search Zillow for properties in a region."""
+    url = build_search_url(region, **filters)
+
+    # Try tier 1 first
+    result = search_with_scrapling(url, use_stealthy=False)
+
+    # If tier 1 fails, try stealthy
+    if 'error' in result and not use_stealthy:
+        console.print("[yellow]Tier 1 failed, trying Stealthy (Camoufox)...[/yellow]")
+        result = search_with_scrapling(url, use_stealthy=True)
+
+    return result
+
+
+def format_search_results(data: dict) -> None:
+    """Pretty print search results."""
+    if 'error' in data:
+        console.print(f"[red]Error: {data['error']}[/red]")
+        return
+
+    total = data.get('totalResults', 0)
+    results = data.get('results', [])
+
+    console.print(f"\n[bold green]Found {total} properties[/bold green]")
+
+    if not results:
+        return
+
+    table = Table()
+    table.add_column("Address", style="cyan", max_width=35)
+    table.add_column("Price", justify="right")
+    table.add_column("Bed/Bath")
+    table.add_column("Sqft")
+    table.add_column("Acres", justify="right")
+    table.add_column("ZPID")
+
+    for r in results[:20]:
+        price = f"${r.get('price', 0):,}" if r.get('price') else 'N/A'
+        beds_baths = f"{r.get('beds', '?')}/{r.get('baths', '?')}"
+        sqft = f"{r.get('sqft', 0):,}" if r.get('sqft') else 'N/A'
+        acres = f"{r.get('lotAcres', 0):.1f}" if r.get('lotAcres') else 'N/A'
+
+        table.add_row(
+            r.get('address', 'N/A')[:35],
+            price,
+            beds_baths,
+            sqft,
+            acres,
+            str(r.get('zpid', 'N/A'))
+        )
+
+    console.print(table)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Zillow property search CLI (scrapling)")
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    # Search command
+    search_parser = subparsers.add_parser("search", help="Search for properties")
+    search_parser.add_argument("region", help="Region to search (e.g., 'Vermont', 'VT', 'NH')")
+    search_parser.add_argument("--beds", type=int, help="Minimum bedrooms")
+    search_parser.add_argument("--baths", type=int, help="Minimum bathrooms")
+    search_parser.add_argument("--min-price", type=int, help="Minimum price")
+    search_parser.add_argument("--max-price", type=int, help="Maximum price")
+    search_parser.add_argument("--min-sqft", type=int, help="Minimum square feet")
+    search_parser.add_argument("--min-acres", type=float, help="Minimum lot size in acres")
+    search_parser.add_argument("--waterfront", action="store_true", help="Waterfront only")
+    search_parser.add_argument("--stealthy", action="store_true", help="Use Stealthy fetcher (slower but more reliable)")
+    search_parser.add_argument("--json", action="store_true", help="Output raw JSON")
+
+    # Lookup command
+    lookup_parser = subparsers.add_parser("lookup", help="Look up an address")
+    lookup_parser.add_argument("address", help="Address to look up")
+    lookup_parser.add_argument("--json", action="store_true", help="Output raw JSON")
+
+    args = parser.parse_args()
+
+    if args.command == "search":
+        filters = {}
+        if args.beds:
+            filters['min_beds'] = args.beds
+        if args.baths:
+            filters['min_baths'] = args.baths
+        if args.min_price:
+            filters['min_price'] = args.min_price
+        if args.max_price:
+            filters['max_price'] = args.max_price
+        if args.min_sqft:
+            filters['min_sqft'] = args.min_sqft
+        if args.min_acres:
+            filters['min_lot_sqft'] = int(args.min_acres * 43560)
+        if args.waterfront:
+            filters['waterfront'] = True
+
+        data = search_zillow(args.region, filters, use_stealthy=args.stealthy)
+
+        if args.json:
+            print(json.dumps(data, indent=2))
+        else:
+            format_search_results(data)
+
+    elif args.command == "lookup":
+        data = zillow_autocomplete(args.address)
+
+        if args.json:
+            print(json.dumps(data, indent=2))
+        else:
+            results = data.get('results', [])
+            if not results:
+                console.print("[yellow]No results found[/yellow]")
+            else:
+                console.print("\n[bold green]Lookup Results:[/bold green]")
+                table = Table()
+                table.add_column("Address", style="cyan")
+                table.add_column("Type")
+                table.add_column("ZPID")
+
+                for r in results[:10]:
+                    zpid = r.get('metaData', {}).get('zpid', 'N/A')
+                    table.add_row(
+                        r.get('display', 'N/A'),
+                        r.get('resultType', 'N/A'),
+                        str(zpid)
+                    )
+
+                console.print(table)
+
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
