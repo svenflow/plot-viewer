@@ -22,10 +22,8 @@ const CONFIG = {
 
     // AWS Terrain Tiles - free, global coverage
     // Uses "terrarium" encoding format (different from Mapbox RGB)
-    // Proxied through CF worker for CORS headers
-    terrainTiles: PROXY_BASE
-        ? [`${PROXY_BASE}/terrain/{z}/{x}/{y}.png`]
-        : ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'],
+    // TileJSON file for proper source configuration
+    terrainUrl: 'terrain-tiles.json',
 
     // Map settings
     defaultCenter: [-72.7, 44.0], // Vermont center
@@ -150,14 +148,13 @@ function initMap() {
     map.addControl(new maplibregl.ScaleControl(), 'bottom-right');
 
     map.on('load', () => {
-        // Add terrain DEM source using AWS terrarium tiles
-        // IMPORTANT: Must specify 'terrarium' encoding (not default 'mapbox')
+        // Add terrain DEM source using TileJSON
+        // The TileJSON file specifies AWS terrarium tiles via CORS proxy
         map.addSource('terrain-dem', {
             type: 'raster-dem',
-            tiles: CONFIG.terrainTiles,
+            url: CONFIG.terrainUrl,
             tileSize: 256,
-            encoding: 'terrarium',
-            maxzoom: 15
+            encoding: 'terrarium'
         });
 
         // Add hillshade layer (hidden by default)
