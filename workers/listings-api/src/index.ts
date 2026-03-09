@@ -72,6 +72,10 @@ export default {
         return await handleFeed(url, env, corsHeaders);
       }
 
+      if (path === '/dedupe' && method === 'POST') {
+        return await handleDedupe(env, corsHeaders);
+      }
+
       return new Response(JSON.stringify({ error: 'Not found' }), {
         status: 404,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -221,14 +225,23 @@ async function handleUpsertListing(request: Request, env: Env, corsHeaders: Reco
   const now = new Date().toISOString();
   const id = data.id || crypto.randomUUID();
 
-  // Check if listing exists (by our ID or external IDs)
+  // Check if listing exists (by our ID, external IDs, or lat/lng proximity)
   let existing = null;
   if (data.id) {
-    existing = await env.DB.prepare('SELECT id, price FROM listings WHERE id = ?').bind(data.id).first();
+    existing = await env.DB.prepare('SELECT id, price, zillow_id, redfin_id FROM listings WHERE id = ?').bind(data.id).first();
   } else if (data.zillow_id) {
-    existing = await env.DB.prepare('SELECT id, price FROM listings WHERE zillow_id = ?').bind(data.zillow_id).first();
+    existing = await env.DB.prepare('SELECT id, price, zillow_id, redfin_id FROM listings WHERE zillow_id = ?').bind(data.zillow_id).first();
   } else if (data.redfin_id) {
-    existing = await env.DB.prepare('SELECT id, price FROM listings WHERE redfin_id = ?').bind(data.redfin_id).first();
+    existing = await env.DB.prepare('SELECT id, price, zillow_id, redfin_id FROM listings WHERE redfin_id = ?').bind(data.redfin_id).first();
+  }
+
+  // If not found by IDs, check for lat/lng proximity (within ~100m = 0.001 degrees)
+  if (!existing && data.lat && data.lng) {
+    existing = await env.DB.prepare(`
+      SELECT id, price, zillow_id, redfin_id FROM listings
+      WHERE ABS(lat - ?) < 0.001 AND ABS(lng - ?) < 0.001
+      LIMIT 1
+    `).bind(data.lat, data.lng).first();
   }
 
   if (existing) {
@@ -244,8 +257,14 @@ async function handleUpsertListing(request: Request, env: Env, corsHeaders: Reco
       `).bind(existingId, data.price, now, data.source || null).run();
     }
 
+    // Merge source IDs - keep existing and add new
+    const mergedZillowId = data.zillow_id || existing.zillow_id;
+    const mergedRedfinId = data.redfin_id || existing.redfin_id;
+
     await env.DB.prepare(`
       UPDATE listings SET
+        zillow_id = COALESCE(?, zillow_id),
+        redfin_id = COALESCE(?, redfin_id),
         address = COALESCE(?, address),
         city = COALESCE(?, city),
         state = COALESCE(?, state),
@@ -273,6 +292,8 @@ async function handleUpsertListing(request: Request, env: Env, corsHeaders: Reco
         tax_assessed_value = COALESCE(?, tax_assessed_value)
       WHERE id = ?
     `).bind(
+      mergedZillowId || null,
+      mergedRedfinId || null,
       data.address || null,
       data.city || null,
       data.state || null,
@@ -615,6 +636,60 @@ async function handleFeed(url: URL, env: Env, corsHeaders: Record<string, string
   return new Response(JSON.stringify({
     new_listings: newListings.results,
     price_drops: priceDrops.results,
+  }), {
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
+}
+
+// Deduplicate listings based on lat/lng proximity
+async function handleDedupe(env: Env, corsHeaders: Record<string, string>): Promise<Response> {
+  // Find all potential duplicates (listings within ~100m of each other)
+  const duplicates = await env.DB.prepare(`
+    SELECT
+      l1.id as id1, l1.address as addr1, l1.source as source1, l1.zillow_id as zillow1, l1.redfin_id as redfin1, l1.first_seen as fs1,
+      l2.id as id2, l2.address as addr2, l2.source as source2, l2.zillow_id as zillow2, l2.redfin_id as redfin2, l2.first_seen as fs2
+    FROM listings l1
+    JOIN listings l2 ON l1.id < l2.id
+    WHERE ABS(l1.lat - l2.lat) < 0.001 AND ABS(l1.lng - l2.lng) < 0.001
+  `).all();
+
+  const merged: string[] = [];
+  const deleted: string[] = [];
+
+  for (const row of duplicates.results) {
+    const r = row as any;
+
+    // Decide which to keep (earlier first_seen) and which to delete
+    const keepId = r.fs1 <= r.fs2 ? r.id1 : r.id2;
+    const deleteId = r.fs1 <= r.fs2 ? r.id2 : r.id1;
+    const keepAddr = r.fs1 <= r.fs2 ? r.addr1 : r.addr2;
+    const deleteAddr = r.fs1 <= r.fs2 ? r.addr2 : r.addr1;
+
+    // Get the source IDs from the one being deleted
+    const deleteZillowId = r.fs1 <= r.fs2 ? r.zillow2 : r.zillow1;
+    const deleteRedfinId = r.fs1 <= r.fs2 ? r.redfin2 : r.redfin1;
+
+    // Delete the duplicate FIRST (to free up unique constraint)
+    await env.DB.prepare('DELETE FROM listings WHERE id = ?').bind(deleteId).run();
+
+    // Then update the kept listing with merged IDs (only if the deleted one had an ID we don't)
+    if (deleteZillowId) {
+      await env.DB.prepare('UPDATE listings SET zillow_id = COALESCE(zillow_id, ?) WHERE id = ?')
+        .bind(deleteZillowId, keepId).run();
+    }
+    if (deleteRedfinId) {
+      await env.DB.prepare('UPDATE listings SET redfin_id = COALESCE(redfin_id, ?) WHERE id = ?')
+        .bind(deleteRedfinId, keepId).run();
+    }
+
+    merged.push(`${keepAddr} (kept) <- ${deleteAddr} (deleted)`);
+    deleted.push(deleteId);
+  }
+
+  return new Response(JSON.stringify({
+    merged_count: merged.length,
+    merged,
+    deleted_ids: deleted,
   }), {
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   });
