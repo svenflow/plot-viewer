@@ -8,13 +8,24 @@
  * - LocalStorage for favorites persistence
  */
 
+// Proxy configuration - use Cloudflare Worker in production for caching
+const PROXY_BASE = window.location.hostname === 'localhost'
+    ? '' // Direct access in dev
+    : 'https://sven-plot-proxy.nicklaudethorat.workers.dev';
+
 // Configuration
 const CONFIG = {
     // VCGI Parcel Feature Service (Vermont standardized parcels)
-    parcelServiceUrl: 'https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services/FS_VCGI_OPENDATA_Cadastral_VTPARCELS_poly_standardized_parcels_SP_v1/FeatureServer/0',
+    // In production, proxied through Cloudflare for caching
+    parcelServiceUrl: PROXY_BASE
+        ? `${PROXY_BASE}/vcgi/FS_VCGI_OPENDATA_Cadastral_VTPARCELS_poly_standardized_parcels_SP_v1/FeatureServer/0`
+        : 'https://services1.arcgis.com/BkFxaEFNwHqX3tAw/arcgis/rest/services/FS_VCGI_OPENDATA_Cadastral_VTPARCELS_poly_standardized_parcels_SP_v1/FeatureServer/0',
 
     // MapLibre demo terrain tiles (free, no API key)
-    terrainUrl: 'https://demotiles.maplibre.org/terrain-tiles/tiles.json',
+    // In production, proxied through Cloudflare for caching
+    terrainUrl: PROXY_BASE
+        ? `${PROXY_BASE}/terrain/tiles.json`
+        : 'https://demotiles.maplibre.org/terrain-tiles/tiles.json',
 
     // Map settings
     defaultCenter: [-72.7, 44.0], // Vermont center
@@ -73,17 +84,17 @@ function initMap() {
         style: {
             version: 8,
             sources: {
-                // OpenStreetMap raster tiles
+                // OpenStreetMap raster tiles (proxied in production)
                 'osm': {
                     type: 'raster',
-                    tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+                    tiles: [PROXY_BASE ? `${PROXY_BASE}/osm/{z}/{x}/{y}.png` : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
                     tileSize: 256,
                     attribution: '© OpenStreetMap contributors'
                 },
-                // ESRI World Imagery (satellite)
+                // ESRI World Imagery (satellite) - proxied in production
                 'satellite': {
                     type: 'raster',
-                    tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+                    tiles: [PROXY_BASE ? `${PROXY_BASE}/satellite/tile/{z}/{y}/{x}` : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
                     tileSize: 256,
                     attribution: '© Esri, Maxar, Earthstar Geographics'
                 }

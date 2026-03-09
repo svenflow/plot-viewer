@@ -1,5 +1,45 @@
 # Plot Viewer - Developer Notes
 
+## Architecture
+
+### Cloudflare Worker Proxy
+
+All external API requests are proxied through a Cloudflare Worker for:
+- **Edge caching** - Reduces load on public servers (VCGI, MapLibre, ESRI)
+- **CORS handling** - Browser can access cross-origin resources
+- **Rate limit protection** - Cached responses avoid 429 errors
+
+**Worker:** `sven-plot-proxy.nicklaudethorat.workers.dev`
+
+**Routes:**
+| Route | Upstream | Cache TTL |
+|-------|----------|-----------|
+| `/vcgi/*` | VCGI ArcGIS services | 1 hour |
+| `/terrain/*` | MapLibre demo DEM tiles | 24 hours |
+| `/satellite/*` | ESRI World Imagery | 24 hours |
+| `/osm/*` | OpenStreetMap tiles | 1 hour |
+
+**Deployment:**
+```bash
+cd workers/tile-proxy
+npm run deploy
+```
+
+### Map Layers
+
+- **OSM base map** - Street/terrain labels
+- **Satellite imagery** - ESRI World Imagery (toggle)
+- **3D Terrain** - MapLibre demo DEM with hillshade (toggle)
+- **Parcel boundaries** - VCGI Vermont parcels (toggle)
+- **Highlighted favorites** - Saved parcels (auto-highlight on click)
+
+### Favorites System
+
+Favorites are stored in localStorage with full polygon geometry. When clicked:
+1. Parcel is highlighted immediately (no API call needed)
+2. Map fits bounds to parcel
+3. Popup shows details
+
 ## Vermont Parcel Data Sources
 
 ### 1. VCGI Statewide Parcel Service (Primary)
