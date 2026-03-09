@@ -267,7 +267,10 @@ async function handleUpsertListing(request: Request, env: Env, corsHeaders: Reco
         enrichment = COALESCE(?, enrichment),
         extra_data = COALESCE(?, extra_data),
         source = COALESCE(?, source),
-        source_url = COALESCE(?, source_url)
+        source_url = COALESCE(?, source_url),
+        days_on_market = COALESCE(?, days_on_market),
+        zestimate = COALESCE(?, zestimate),
+        tax_assessed_value = COALESCE(?, tax_assessed_value)
       WHERE id = ?
     `).bind(
       data.address || null,
@@ -292,6 +295,9 @@ async function handleUpsertListing(request: Request, env: Env, corsHeaders: Reco
       data.extra_data ? JSON.stringify(data.extra_data) : null,
       data.source || null,
       data.source_url || null,
+      data.days_on_market ?? null,
+      data.zestimate ?? null,
+      data.tax_assessed_value ?? null,
       existingId
     ).run();
 
@@ -305,8 +311,8 @@ async function handleUpsertListing(request: Request, env: Env, corsHeaders: Reco
         id, zillow_id, redfin_id, address, city, state, zip, lat, lng,
         price, beds, baths, sqft, lot_acres, year_built, property_type, status,
         primary_image_url, image_urls, first_seen, last_seen, last_updated,
-        enrichment, extra_data, source, source_url
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        enrichment, extra_data, source, source_url, days_on_market, zestimate, tax_assessed_value
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       id,
       data.zillow_id || null,
@@ -333,7 +339,10 @@ async function handleUpsertListing(request: Request, env: Env, corsHeaders: Reco
       data.enrichment ? JSON.stringify(data.enrichment) : null,
       data.extra_data ? JSON.stringify(data.extra_data) : null,
       data.source || null,
-      data.source_url || null
+      data.source_url || null,
+      data.days_on_market ?? null,
+      data.zestimate ?? null,
+      data.tax_assessed_value ?? null
     ).run();
 
     // Record initial price

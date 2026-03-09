@@ -144,7 +144,12 @@ def normalize_listing(listing: dict, source: str) -> dict:
             "lng": listing.get("lon"),
             "primary_image_url": listing.get("imgSrc"),
             "source_url": listing.get("detailUrl"),
-            "property_type": "single_family",  # Zillow search filters to single family
+            "property_type": "single_family",
+            # Additional fields
+            "year_built": listing.get("yearBuilt"),
+            "days_on_market": listing.get("daysOnZillow"),
+            "zestimate": listing.get("zestimate"),
+            "tax_assessed_value": listing.get("taxAssessedValue"),
         })
 
     # Redfin format

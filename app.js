@@ -894,6 +894,12 @@ function showListingPopup(l) {
         if (l.vcgi_total_value) vcgiParts.push(`Assessed: $${l.vcgi_total_value.toLocaleString()}`);
         const vcgiStr = vcgiParts.length > 0 ? vcgiParts.join(' · ') : '';
 
+        // Valuation info (Zestimate, tax assessment)
+        const valuationParts = [];
+        if (l.zestimate) valuationParts.push(`Zestimate: $${l.zestimate.toLocaleString()}`);
+        if (l.tax_assessed_value) valuationParts.push(`Tax: $${l.tax_assessed_value.toLocaleString()}`);
+        const valuationStr = valuationParts.length > 0 ? valuationParts.join(' · ') : '';
+
         contentHtml = `
             <div style="font-weight: 600; color: #10b981; font-size: 1.1em;">${priceStr}</div>
             <div style="margin: 4px 0;">${l.address || 'Address N/A'}</div>
@@ -901,6 +907,7 @@ function showListingPopup(l) {
                 ${l.beds ? `${l.beds} beds` : ''} ${l.baths ? `· ${l.baths} baths` : ''} ${l.sqft ? `· ${l.sqft.toLocaleString()} sqft` : ''}
             </div>
             ${acres ? `<div style="font-size: 0.9em; color: #666;">${parseFloat(acres).toFixed(2)} ${acresLabel}</div>` : ''}
+            ${valuationStr ? `<div style="font-size: 0.85em; color: #888; margin-top: 4px;">💰 ${valuationStr}</div>` : ''}
             ${vcgiStr ? `<div style="font-size: 0.85em; color: #888; margin-top: 4px;">📋 ${vcgiStr}</div>` : ''}
             ${utilityStr ? `<div style="font-size: 0.85em; color: #888; margin-top: 4px;">${utilityStr}</div>` : ''}
             ${daysStr ? `<div style="font-size: 0.85em; color: #888; margin-top: 4px;">📅 ${daysStr}</div>` : ''}

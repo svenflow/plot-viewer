@@ -56,6 +56,10 @@ export interface Listing {
   vcgi_property_type?: string;  // Property type code
   vcgi_geometry?: string;  // GeoJSON polygon
 
+  // Valuation data
+  zestimate?: number;  // Zillow estimate
+  tax_assessed_value?: number;  // Tax assessment
+
   // User data
   is_favorite: boolean;
   notes?: string;

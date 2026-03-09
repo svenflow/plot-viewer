@@ -116,6 +116,13 @@ def search_with_scrapling(url: str, use_stealthy: bool = False) -> dict:
 
         results = []
         for r in list_results:
+            # Calculate lot acres from sqft if needed
+            lot_acres = None
+            if r.get('lotAreaUnit') == 'acres':
+                lot_acres = r.get('lotAreaValue')
+            elif r.get('lotAreaUnit') == 'sqft' and r.get('lotAreaValue'):
+                lot_acres = r.get('lotAreaValue') / 43560
+
             results.append({
                 'zpid': r.get('zpid'),
                 'address': r.get('address'),
@@ -123,12 +130,18 @@ def search_with_scrapling(url: str, use_stealthy: bool = False) -> dict:
                 'beds': r.get('beds'),
                 'baths': r.get('baths'),
                 'sqft': r.get('area'),
-                'lotAcres': r.get('lotAreaValue') if r.get('lotAreaUnit') == 'acres' else None,
+                'lotAcres': lot_acres,
                 'lat': r.get('latLong', {}).get('latitude'),
                 'lon': r.get('latLong', {}).get('longitude'),
                 'statusType': r.get('statusType'),
                 'imgSrc': r.get('imgSrc'),
                 'detailUrl': r.get('detailUrl'),
+                # Additional fields
+                'yearBuilt': r.get('hdpData', {}).get('homeInfo', {}).get('yearBuilt'),
+                'daysOnZillow': r.get('hdpData', {}).get('homeInfo', {}).get('daysOnZillow'),
+                'zestimate': r.get('hdpData', {}).get('homeInfo', {}).get('zestimate'),
+                'taxAssessedValue': r.get('hdpData', {}).get('homeInfo', {}).get('taxAssessedValue'),
+                'homeStatus': r.get('hdpData', {}).get('homeInfo', {}).get('homeStatus'),
             })
 
         return {
