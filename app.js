@@ -721,14 +721,28 @@ function renderListings() {
         const priceStr = l.price ? `$${l.price.toLocaleString()}` : 'Price N/A';
         const bedsStr = l.beds ? `${l.beds}bd` : '';
         const bathsStr = l.baths ? `${l.baths}ba` : '';
+        const sqftStr = l.sqft ? `${l.sqft.toLocaleString()}sf` : '';
         const acresStr = l.lot_acres ? `${l.lot_acres.toFixed(1)}ac` : '';
-        const details = [bedsStr, bathsStr, acresStr].filter(Boolean).join(' · ');
+        const details = [bedsStr, bathsStr, sqftStr, acresStr].filter(Boolean).join(' · ');
+
+        // Days on market
+        const daysOnMarket = getDaysOnMarket(l.first_seen);
+        const daysStr = daysOnMarket !== null ? (daysOnMarket === 0 ? 'New' : `${daysOnMarket}d`) : '';
+
+        // Image thumbnail
+        const imageUrl = l.primary_image_url || (l.image_urls && l.image_urls[0]);
 
         return `
         <div class="listing-item" data-id="${l.id}">
-            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                <div style="flex: 1;">
-                    <div class="price">${priceStr}</div>
+            <div style="display: flex; gap: 10px;">
+                ${imageUrl ? `<div style="width: 60px; height: 60px; flex-shrink: 0; border-radius: 6px; overflow: hidden; background: #333;">
+                    <img src="${imageUrl}" alt="" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.parentElement.style.display='none'">
+                </div>` : ''}
+                <div style="flex: 1; min-width: 0;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div class="price">${priceStr}</div>
+                        ${daysStr ? `<span style="font-size: 0.75em; color: #888;">📅 ${daysStr}</span>` : ''}
+                    </div>
                     <div class="details">${details || '—'}</div>
                     <div class="address">${l.address || 'Address N/A'}</div>
                 </div>
@@ -799,23 +813,51 @@ function updateListingMarkers() {
     }
 }
 
+// Calculate days on market from first_seen date
+function getDaysOnMarket(firstSeen) {
+    if (!firstSeen) return null;
+    const first = new Date(firstSeen);
+    const now = new Date();
+    const diffMs = now - first;
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    return diffDays;
+}
+
 // Show popup for a listing
 function showListingPopup(l) {
     // Remove existing popups
     document.querySelectorAll('.maplibregl-popup').forEach(p => p.remove());
 
     const priceStr = l.price ? `$${l.price.toLocaleString()}` : 'Price N/A';
+    const daysOnMarket = getDaysOnMarket(l.first_seen);
+    const daysStr = daysOnMarket !== null ? (daysOnMarket === 0 ? 'New today' : `${daysOnMarket} day${daysOnMarket === 1 ? '' : 's'} on market`) : '';
+
+    // Build image HTML if available
+    const imageUrl = l.primary_image_url || (l.image_urls && l.image_urls[0]);
+    const imageHtml = imageUrl ? `
+        <div style="margin: -12px -12px 8px -12px; border-radius: 8px 8px 0 0; overflow: hidden;">
+            <img src="${imageUrl}" alt="Property" style="width: 100%; height: 120px; object-fit: cover;" onerror="this.parentElement.style.display='none'">
+        </div>
+    ` : '';
+
+    // Google Maps link
+    const googleMapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(l.address || `${l.lat},${l.lng}`)}`;
 
     new maplibregl.Popup({ closeOnClick: true, maxWidth: '300px' })
         .setLngLat([l.lng, l.lat])
         .setHTML(`
+            ${imageHtml}
             <div style="font-weight: 600; color: #10b981; font-size: 1.1em;">${priceStr}</div>
             <div style="margin: 4px 0;">${l.address || 'Address N/A'}</div>
             <div style="font-size: 0.9em; color: #666;">
                 ${l.beds ? `${l.beds} beds` : ''} ${l.baths ? `· ${l.baths} baths` : ''} ${l.sqft ? `· ${l.sqft.toLocaleString()} sqft` : ''}
             </div>
             ${l.lot_acres ? `<div style="font-size: 0.9em; color: #666;">${l.lot_acres.toFixed(2)} acres</div>` : ''}
-            ${l.source_url ? `<a href="${l.source_url}" target="_blank" style="font-size: 0.85em; color: #3b82f6; display: block; margin-top: 8px;">View on ${l.source || 'source'} →</a>` : ''}
+            ${daysStr ? `<div style="font-size: 0.85em; color: #888; margin-top: 4px;">📅 ${daysStr}</div>` : ''}
+            <div style="display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap;">
+                ${l.source_url ? `<a href="${l.source_url}" target="_blank" style="font-size: 0.85em; color: #3b82f6;">View on ${l.source || 'source'} →</a>` : ''}
+                <a href="${googleMapsUrl}" target="_blank" style="font-size: 0.85em; color: #3b82f6;">📍 Google Maps</a>
+            </div>
         `)
         .addTo(map);
 
