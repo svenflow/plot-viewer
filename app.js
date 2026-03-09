@@ -4,7 +4,6 @@
  * Static property visualization using:
  * - MapLibre GL JS for rendering (with 3D terrain)
  * - VCGI ArcGIS Feature Service for Vermont parcel data
- * - Turf.js for geospatial calculations
  * - LocalStorage for favorites persistence
  */
 
@@ -34,48 +33,70 @@ const CONFIG = {
     // Query settings
     maxRecords: 1000,
     minZoomForParcels: 12,
+    debounceMs: 300,
 };
 
 // State
 let map = null;
 let selectedParcelId = null;
 let highlightedFavoriteId = null;
+let loadParcelsTimeout = null;
+let currentFetchController = null;
 
-// Default favorites (preset parcels of interest)
-const DEFAULT_FAVORITES = [
-    {
-        id: '618-194-10882',
-        name: 'STOCKBRIDGE',
-        address: '0 Blackmer Blvd',
-        acres: 74.4,
-        value: 149999,
-        span: '618-194-10882',
-        geometry: {
-            type: 'Polygon',
-            coordinates: [[[-72.7418877770988,43.7846073465063],[-72.7438683570201,43.7816535542558],[-72.7398039564224,43.7802953235268],[-72.7392619110588,43.7801141690879],[-72.7395501693638,43.7797522929575],[-72.741446840199,43.7773711052132],[-72.7418031202869,43.7769237864111],[-72.7421806439915,43.7768526286393],[-72.7423413944675,43.7768223294702],[-72.7427044362636,43.7768179957839],[-72.7429039039667,43.7768156144063],[-72.7434961653171,43.7768390058395],[-72.7441824137984,43.7769492074546],[-72.7444286276782,43.7770233265751],[-72.7447572595474,43.7771222552067],[-72.7450398284402,43.7772160505213],[-72.7452230908932,43.7769851931063],[-72.7461976130613,43.7757575446746],[-72.7467164448722,43.7749383394915],[-72.7469415556415,43.7745828937094],[-72.7469591899604,43.7745550501024],[-72.7472643913597,43.7749022420975],[-72.7484022503073,43.7739036224716],[-72.748438297424,43.7738719853697],[-72.748596875671,43.7739400855089],[-72.7488570080375,43.7740489332153],[-72.7492042093668,43.7741861385701],[-72.7492119965492,43.7741918873653],[-72.7498352728084,43.7744435276631],[-72.7498982993739,43.7744779863205],[-72.7499375759943,43.7744950573502],[-72.7499136126355,43.7745785532671],[-72.750068887515,43.7747374861706],[-72.7505294115534,43.7752088525542],[-72.7508224711542,43.7749170841247],[-72.7508708169426,43.7748693145262],[-72.7508921293035,43.774878443839],[-72.7512708540125,43.7750330132207],[-72.7516575115268,43.7752275030635],[-72.7516730624514,43.7752332345948],[-72.7519019561613,43.7753877095777],[-72.7521306803535,43.775593796512],[-72.7521307039891,43.7755994218238],[-72.7522888769608,43.7758284472219],[-72.7523140578096,43.7758868720167],[-72.7522864659061,43.7758993519287],[-72.751923093567,43.7760637129226],[-72.7513025482891,43.7764723751503],[-72.7513989362719,43.7768065293523],[-72.7514557632101,43.7770035359531],[-72.7514996602275,43.7771557138813],[-72.7515646961854,43.7771731506844],[-72.7514612455769,43.7772082033827],[-72.751422062793,43.7772140553558],[-72.7513113822266,43.7772024855176],[-72.7511221442294,43.7771567734937],[-72.751019371586,43.7771796420175],[-72.750901214432,43.7772369984428],[-72.7508934507999,43.7772370154857],[-72.7508459678817,43.7772999833597],[-72.7508068036027,43.7774030134403],[-72.7508068512155,43.7774144044693],[-72.7507673356368,43.7777122132417],[-72.7507596195514,43.7777236222042],[-72.7507203718851,43.7779926006029],[-72.7507201887085,43.7782273189915],[-72.7507285209556,43.7784563933289],[-72.7507046923638,43.7785136838756],[-72.7507047158681,43.7785193091853],[-72.7506731234232,43.7785766167549],[-72.7504918019725,43.7787540718606],[-72.7504604529479,43.7787769237251],[-72.7500899229862,43.7791034434942],[-72.7496875323544,43.7794241245745],[-72.7494827943267,43.7795729407719],[-72.7494669016114,43.7795787412314],[-72.7493013309417,43.779624527513],[-72.7492381009289,43.7796359161372],[-72.7490803183938,43.7796875912923],[-72.7490174531609,43.7796932132303],[-72.748851857256,43.7797333735549],[-72.748662676086,43.7797963672136],[-72.7485992959339,43.7798651344819],[-72.7485916263569,43.7798879343214],[-72.7485599839821,43.7799338493737],[-72.748544139515,43.7799510416283],[-72.7484811854012,43.780122751985],[-72.7484653396159,43.7801399433309],[-72.7483787525626,43.7803230961279],[-72.748362906699,43.7803402883593],[-72.7482447081509,43.7804834292779],[-72.7482369918082,43.7804949775742],[-72.7480869116903,43.7806265156217],[-72.7479688409317,43.7807067923584],[-72.7479293382534,43.7807296603112],[-72.7478110670413,43.7808556440349],[-72.7474797525296,43.7810961426151],[-72.7473538094298,43.781244924722],[-72.747353833201,43.781250690438],[-72.7472670515486,43.7813881369675],[-72.7472512300896,43.7814110947561],[-72.7471961867087,43.7815255490031],[-72.7471962104687,43.781531315619],[-72.7471256048177,43.7817317310577],[-72.7471174761827,43.7817373739915],[-72.7470625503942,43.781880517239],[-72.7470310227767,43.7819548401116],[-72.7468889136037,43.7821381117155],[-72.7467628962915,43.7822697364146],[-72.7463843015899,43.7825332573893],[-72.7462346354146,43.782767875611],[-72.7462186829362,43.7828538375322],[-72.7461794011444,43.7830254955358],[-72.7461954108095,43.7832373965895],[-72.7462426547175,43.7835866294461],[-72.7462191251593,43.7837183134734],[-72.746250758922,43.7839529630748],[-72.7462508991922,43.7841762893974],[-72.7462826144546,43.7845254152277],[-72.7463142713372,43.7847658304923],[-72.7463143654615,43.7847887538364],[-72.7463381767384,43.7849147104694],[-72.746282857556,43.7852467256208],[-72.7462752204558,43.7857504921116],[-72.7462356072513,43.7858421303263],[-72.7462278892602,43.785853538071],[-72.74614120509,43.7859222136997],[-72.7461412287486,43.7859279794116],[-72.7461015928106,43.7860138518632],[-72.7439400364286,43.7852930959945],[-72.7418878467639,43.7846073697604],[-72.7418877770988,43.7846073465063]]]
-        },
-        note: '74.4 acre parent parcel (SPAN 618-194-10882) - 56.5 acres being sold @ $149,999',
-        savedAt: '2026-03-08T00:00:00.000Z'
-    }
-];
-
-// Merge defaults with localStorage (don't duplicate)
-let storedFavorites = JSON.parse(localStorage.getItem('plotViewer_favorites') || '[]');
-let favorites = [...DEFAULT_FAVORITES];
-storedFavorites.forEach(f => {
-    if (!favorites.find(df => df.id === f.id)) {
-        favorites.push(f);
-    }
-});
-localStorage.setItem('plotViewer_favorites', JSON.stringify(favorites));
+// Load default favorites from JSON
+let favorites = [];
 
 // Initialize
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
+    await loadDefaultFavorites();
     initMap();
     initEventListeners();
     renderFavorites();
+}
+
+async function loadDefaultFavorites() {
+    try {
+        const response = await fetch('default-favorites.json');
+        const defaultFavorites = await response.json();
+
+        // Merge with localStorage
+        const storedFavorites = JSON.parse(localStorage.getItem('plotViewer_favorites') || '[]');
+        favorites = [...defaultFavorites];
+        storedFavorites.forEach(f => {
+            if (!favorites.find(df => df.id === f.id)) {
+                favorites.push(f);
+            }
+        });
+        localStorage.setItem('plotViewer_favorites', JSON.stringify(favorites));
+    } catch (e) {
+        console.warn('Could not load default favorites:', e);
+        favorites = JSON.parse(localStorage.getItem('plotViewer_favorites') || '[]');
+    }
+}
+
+// Toast notification system
+function showToast(message, type = 'info') {
+    const existing = document.querySelector('.toast');
+    if (existing) existing.remove();
+
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.textContent = message;
+    document.body.appendChild(toast);
+
+    setTimeout(() => toast.classList.add('show'), 10);
+    setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+}
+
+// Sanitize user input for SQL queries
+function sanitizeForSQL(input) {
+    // Escape single quotes by doubling them
+    return input.replace(/'/g, "''").replace(/[%_]/g, '');
 }
 
 function initMap() {
@@ -119,7 +140,8 @@ function initMap() {
         },
         center: CONFIG.defaultCenter,
         zoom: CONFIG.defaultZoom,
-        maxPitch: 85
+        maxPitch: 85,
+        hash: true // Enable hash routing for shareable URLs
     });
 
     // Add navigation controls
@@ -226,8 +248,8 @@ function initMap() {
             }
         });
 
-        // Load parcels on move end
-        map.on('moveend', loadParcelsInView);
+        // Load parcels on move end with debouncing
+        map.on('moveend', debouncedLoadParcels);
 
         // Initial load
         loadParcelsInView();
@@ -263,6 +285,13 @@ function initMap() {
     });
 }
 
+function debouncedLoadParcels() {
+    if (loadParcelsTimeout) {
+        clearTimeout(loadParcelsTimeout);
+    }
+    loadParcelsTimeout = setTimeout(loadParcelsInView, CONFIG.debounceMs);
+}
+
 async function loadParcelsInView() {
     const zoom = map.getZoom();
 
@@ -272,7 +301,15 @@ async function loadParcelsInView() {
         return;
     }
 
-    // Load parcels in background - no modal interruption
+    // Cancel any in-flight request
+    if (currentFetchController) {
+        currentFetchController.abort();
+    }
+    currentFetchController = new AbortController();
+
+    // Show subtle loading indicator
+    document.getElementById('loading-indicator')?.classList.add('active');
+
     try {
         const bounds = map.getBounds();
         const bbox = `${bounds.getWest()},${bounds.getSouth()},${bounds.getEast()},${bounds.getNorth()}`;
@@ -289,20 +326,27 @@ async function loadParcelsInView() {
             resultRecordCount: CONFIG.maxRecords
         });
 
-        const response = await fetch(`${CONFIG.parcelServiceUrl}/query?${params}`);
+        const response = await fetch(`${CONFIG.parcelServiceUrl}/query?${params}`, {
+            signal: currentFetchController.signal
+        });
         const data = await response.json();
 
         if (data.features) {
-            // Add unique IDs for feature state
+            // Add unique IDs for feature state using SPAN if available
             data.features.forEach((f, i) => {
-                f.id = i;
+                f.id = f.properties?.SPAN || i;
             });
 
             map.getSource('parcels').setData(data);
             console.log(`Loaded ${data.features.length} parcels`);
         }
     } catch (error) {
-        console.error('Error loading parcels:', error);
+        if (error.name !== 'AbortError') {
+            console.error('Error loading parcels:', error);
+        }
+    } finally {
+        document.getElementById('loading-indicator')?.classList.remove('active');
+        currentFetchController = null;
     }
 }
 
@@ -321,12 +365,22 @@ function selectParcel(feature) {
 
     const props = feature.properties;
 
-    // Calculate acreage
+    // Calculate acreage using built-in if needed
     let acres = props.ACRESGL || props.ACRES || props.GISAcres || props.Acreage;
     if (!acres && feature.geometry) {
         try {
-            const area = turf.area(feature);
-            acres = (area / 4046.86).toFixed(2);
+            // Simple polygon area calculation (rough estimate)
+            const coords = feature.geometry.coordinates[0];
+            let area = 0;
+            for (let i = 0; i < coords.length - 1; i++) {
+                area += coords[i][0] * coords[i + 1][1];
+                area -= coords[i + 1][0] * coords[i][1];
+            }
+            area = Math.abs(area) / 2;
+            // Convert from degrees^2 to acres (rough estimate at VT latitude)
+            const metersPerDegree = 111320 * Math.cos(43.8 * Math.PI / 180);
+            const sqMeters = area * metersPerDegree * metersPerDegree;
+            acres = (sqMeters / 4046.86).toFixed(2);
         } catch (e) {
             acres = 'N/A';
         }
@@ -413,11 +467,33 @@ function initEventListeners() {
 
     // Save favorite
     document.getElementById('save-favorite').addEventListener('click', saveFavorite);
+
+    // Event delegation for favorites
+    document.getElementById('favorites-list').addEventListener('click', (e) => {
+        const item = e.target.closest('.favorite-item');
+        if (!item) return;
+
+        if (e.target.classList.contains('remove')) {
+            e.stopPropagation();
+            removeFavorite(item.dataset.id);
+            return;
+        }
+
+        const fav = favorites.find(f => f.id === item.dataset.id);
+        if (fav && fav.geometry) {
+            highlightFavorite(fav);
+            const bbox = getBbox(fav.geometry);
+            map.fitBounds(bbox, { padding: 100, maxZoom: 16, duration: 1000 });
+        }
+    });
 }
 
 async function performSearch() {
-    const query = document.getElementById('search-input').value.trim();
-    if (!query) return;
+    const rawQuery = document.getElementById('search-input').value.trim();
+    if (!rawQuery) return;
+
+    // Sanitize input to prevent SQL injection
+    const query = sanitizeForSQL(rawQuery);
 
     showLoading(true);
 
@@ -435,19 +511,19 @@ async function performSearch() {
         const data = await response.json();
 
         if (data.features && data.features.length > 0) {
-            data.features.forEach((f, i) => f.id = i);
+            data.features.forEach((f, i) => f.id = f.properties?.SPAN || i);
 
-            const bbox = turf.bbox({ type: 'FeatureCollection', features: data.features });
+            const bbox = getFeatureCollectionBbox(data.features);
             map.fitBounds(bbox, { padding: 50 });
 
             map.getSource('parcels').setData(data);
-            console.log(`Found ${data.features.length} results`);
+            showToast(`Found ${data.features.length} parcels`, 'success');
         } else {
-            alert('No parcels found matching your search.');
+            showToast('No parcels found matching your search.', 'warning');
         }
     } catch (error) {
         console.error('Search error:', error);
-        alert('Search failed. Please try again.');
+        showToast('Search failed. Please try again.', 'error');
     } finally {
         showLoading(false);
     }
@@ -467,18 +543,26 @@ function applyFilters() {
 
     map.setFilter('parcels-fill', filter);
     map.setFilter('parcels-outline', filter);
+    showToast('Filters applied', 'success');
 }
 
 function saveFavorite() {
-    if (selectedParcelId === null) return;
+    if (selectedParcelId === null) {
+        showToast('Select a parcel first', 'warning');
+        return;
+    }
 
-    // Get the selected feature from the source
-    const source = map.getSource('parcels');
-    const data = source._data;
-    const feature = data.features.find(f => f.id === selectedParcelId);
+    // Query rendered features to get the selected parcel
+    const features = map.querySourceFeatures('parcels', {
+        filter: ['==', ['id'], selectedParcelId]
+    });
 
-    if (!feature) return;
+    if (features.length === 0) {
+        showToast('Could not find parcel data', 'error');
+        return;
+    }
 
+    const feature = features[0];
     const props = feature.properties;
     const favorite = {
         id: props.SPAN || props.ParcelID || Date.now().toString(),
@@ -492,13 +576,14 @@ function saveFavorite() {
     };
 
     if (favorites.find(f => f.id === favorite.id)) {
-        alert('This parcel is already in your favorites.');
+        showToast('This parcel is already in your favorites.', 'warning');
         return;
     }
 
     favorites.push(favorite);
     localStorage.setItem('plotViewer_favorites', JSON.stringify(favorites));
     renderFavorites();
+    showToast('Parcel saved to favorites', 'success');
 }
 
 function renderFavorites() {
@@ -516,27 +601,9 @@ function renderFavorites() {
                 <div class="acres">${f.acres} acres</div>
                 ${f.address ? `<div class="address">${f.address}</div>` : ''}
             </div>
-            <span class="remove" onclick="event.stopPropagation(); removeFavorite('${f.id}')">✕</span>
+            <span class="remove">✕</span>
         </div>
     `).join('');
-
-    // Add click handlers to fly to and highlight favorite
-    container.querySelectorAll('.favorite-item').forEach(item => {
-        item.addEventListener('click', async (e) => {
-            if (e.target.classList.contains('remove')) return;
-
-            const id = item.dataset.id;
-            const fav = favorites.find(f => f.id === id);
-            if (fav && fav.geometry) {
-                // Highlight the favorite parcel immediately
-                highlightFavorite(fav);
-
-                // Fit bounds to the parcel
-                const bbox = turf.bbox({ type: 'Feature', geometry: fav.geometry });
-                map.fitBounds(bbox, { padding: 100, maxZoom: 16, duration: 1000 });
-            }
-        });
-    });
 }
 
 function highlightFavorite(fav) {
@@ -560,13 +627,13 @@ function highlightFavorite(fav) {
     highlightedFavoriteId = fav.id;
 
     // Show popup at center
-    const center = turf.center(feature);
+    const center = getCenter(fav.geometry);
 
     // Remove existing popups
     document.querySelectorAll('.maplibregl-popup').forEach(p => p.remove());
 
     new maplibregl.Popup({ closeOnClick: false })
-        .setLngLat(center.geometry.coordinates)
+        .setLngLat(center)
         .setHTML(`
             <div class="popup-title">${fav.name}</div>
             <div class="popup-field">
@@ -593,6 +660,7 @@ function removeFavorite(id) {
     favorites = favorites.filter(f => f.id !== id);
     localStorage.setItem('plotViewer_favorites', JSON.stringify(favorites));
     renderFavorites();
+    showToast('Removed from favorites', 'info');
 
     // Clear highlight if removing the highlighted one
     if (highlightedFavoriteId === id) {
@@ -605,5 +673,37 @@ function showLoading(show) {
     document.getElementById('loading').classList.toggle('hidden', !show);
 }
 
-// Expose for onclick handlers
-window.removeFavorite = removeFavorite;
+// Simple geometry utilities (no external dependencies)
+function getBbox(geometry) {
+    const coords = geometry.type === 'Polygon' ? geometry.coordinates[0] : geometry.coordinates;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    coords.forEach(c => {
+        minX = Math.min(minX, c[0]);
+        minY = Math.min(minY, c[1]);
+        maxX = Math.max(maxX, c[0]);
+        maxY = Math.max(maxY, c[1]);
+    });
+    return [[minX, minY], [maxX, maxY]];
+}
+
+function getFeatureCollectionBbox(features) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    features.forEach(f => {
+        const bbox = getBbox(f.geometry);
+        minX = Math.min(minX, bbox[0][0]);
+        minY = Math.min(minY, bbox[0][1]);
+        maxX = Math.max(maxX, bbox[1][0]);
+        maxY = Math.max(maxY, bbox[1][1]);
+    });
+    return [[minX, minY], [maxX, maxY]];
+}
+
+function getCenter(geometry) {
+    const coords = geometry.type === 'Polygon' ? geometry.coordinates[0] : geometry.coordinates;
+    let sumX = 0, sumY = 0;
+    coords.forEach(c => {
+        sumX += c[0];
+        sumY += c[1];
+    });
+    return [sumX / coords.length, sumY / coords.length];
+}

@@ -113,15 +113,16 @@
 
         <main id="map-container">
             <div id="map"></div>
+            <div id="loading-indicator"></div>
             <div id="loading" class="hidden">
                 <div class="spinner"></div>
-                <p>Loading parcels...</p>
+                <p>Searching...</p>
             </div>
         </main>
     </div>
 
     <script src="https://unpkg.com/maplibre-gl@4.1.2/dist/maplibre-gl.js"></script>
-    <script src="https://unpkg.com/@turf/turf@7/turf.min.js"></script>
+    <!-- No more Turf.js - using built-in geometry calculations -->
     <script src="app.js"></script>
 </body>
 </html>
