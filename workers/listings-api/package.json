@@ -10,8 +10,8 @@
     "db:migrate:local": "wrangler d1 migrations apply plot-listings --local"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20240129.0",
+    "@cloudflare/workers-types": "^5.20261029.1",
     "typescript": "^5.3.3",
-    "wrangler": "^3.25.0"
+    "wrangler": "^4.155.0"
   }
 }
